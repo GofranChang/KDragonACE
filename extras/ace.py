@@ -31,6 +31,8 @@ class DuckAce:
         self._park_previous_tool = -1
         self._park_index = -1
 
+        self._last_get_ace_response_time = None
+
         # Default data to prevent exceptions
         self._info = {
             'status': 'ready',
@@ -120,12 +122,20 @@ class DuckAce:
             data ^= (data & 0x0f) << 4
             _crc = ((data << 8) | (_crc >> 8)) ^ (data >> 4) ^ (data << 3)
         return _crc
+    
+
+    def _update_request_id(self):
+        if self._request_id >= 16382:
+            # self._reconnect_serial()
+            self._request_id = 0
+        else:
+            self._request_id += 1
 
 
     def _send_request(self, request):
         if not 'id' in request:
             request['id'] = self._request_id
-            self._request_id += 1
+            self._update_request_id()
 
         payload = json.dumps(request)
         payload = bytes(payload, 'utf-8')
@@ -136,7 +146,19 @@ class DuckAce:
         data += struct.pack('@H', self._calc_crc(payload))
         data += bytes([0xFE])
 
-        self._serial.write(data)
+        # logging.info(f'[ACE] >>> {request}')
+
+        try:
+            self._serial.write(data)
+        except Exception as e:
+            logging.info(f"Serial write failed: {e}, attempting to reconnect...")
+            try:
+                self._reconnect_serial()
+                self._serial.write(data)
+                logging.info("Resend successful after reconnection.")
+            except Exception as e2:
+                logging.info(f"Resend failed after reconnection: {e2}")
+                raise e2
 
 
     def _main_eval(self, eventtime):
@@ -147,11 +169,39 @@ class DuckAce:
 
         return eventtime + 0.25
 
+    def _reconnect_serial(self, max_attempts=3, delay=1):
+        # 重连函数，最多重试 max_attempts 次
+        for attempt in range(max_attempts):
+            try:
+                logging.info(f"Attempt {attempt+1} to reconnect...")
+                self._serial = serial.Serial(port=self.serial_name,
+                                             baudrate=self.baud,
+                                             timeout=2,
+                                             write_timeout=2)
+                if self._serial.isOpen():
+                    logging.info("Reconnected successfully.")
+                    return
+            except Exception as e:
+                logging.info(f"Reconnect attempt {attempt+1} failed: {e}")
+            time.sleep(delay)
+        raise Exception("Failed to reconnect to serial port.")
+
 
     def _reader(self):
         while self._connected:
             try:
-                ret = self._serial.read_until(expected=bytes([0xFE]), size=4096)
+                if None != self._last_get_ace_response_time and time.time() - self._last_assist_count > 2:
+                    self._reconnect_serial()
+
+                try:
+                    ret = self._serial.read_until(expected=bytes([0xFE]), size=4096)
+                except Exception as e:
+                    self._reconnect_serial()
+                    ret = self._serial.read_until(expected=bytes([0xFE]), size=4096)
+                    logging.info("[ACE] Resend successful after reconnection.")
+                except Exception as e2:
+                    logging.info(f"Resend failed after reconnection: {e2}")
+                    raise e2
 
                 if not (ret[0] == 0xFF and ret[1] == 0xAA and ret[len(ret) - 1] == 0xFE):
                     logging.warning('ACE: Invalid data recieved: ' + str(ret))
@@ -184,6 +234,9 @@ class DuckAce:
                     continue
 
                 ret = json.loads(rpayload.decode('utf-8'))
+
+                self._last_get_ace_response_time = time.time()
+                # logging.info(f'[ACE] <<< {ret}')
                 id = ret['id']
                 if id in self._callback_map:
                     callback = self._callback_map.pop(id)
@@ -202,7 +255,7 @@ class DuckAce:
                     task = self._queue.get()
                     if task is not None:
                         id = self._request_id
-                        self._request_id += 1
+                        self._update_request_id()
                         self._callback_map[id] = task[1]
                         task[0]['id'] = id
 
@@ -236,7 +289,7 @@ class DuckAce:
                                     self._send_request({"method": "stop_feed_assist", "params": {"index": self._park_index}})
 
                 id = self._request_id
-                self._request_id += 1
+                self._update_request_id()
                 self._callback_map[id] = callback
 
                 self._send_request({"id": id, "method": "get_status"})
@@ -484,7 +537,7 @@ class DuckAce:
 
         self.variables['ace_filament_pos'] = "toolhead"
 
-        self._extruder_move(70, 5)
+        # The nozzle should be cleaned by brushing
         self.variables['ace_filament_pos'] = "nozzle"
 
     cmd_ACE_CHANGE_TOOL_help = 'Changes tool'
