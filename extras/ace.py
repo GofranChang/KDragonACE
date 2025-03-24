@@ -170,7 +170,6 @@ class DuckAce:
         return eventtime + 0.25
 
     def _reconnect_serial(self, max_attempts=3, delay=1):
-        # 重连函数，最多重试 max_attempts 次
         for attempt in range(max_attempts):
             try:
                 logging.info(f"Attempt {attempt+1} to reconnect...")
