@@ -189,7 +189,7 @@ class DuckAce:
     def _reader(self):
         while self._connected:
             try:
-                if None != self._last_get_ace_response_time and time.time() - self._last_assist_count > 2:
+                if None != self._last_get_ace_response_time and time.time() - self._last_get_ace_response_time > 2:
                     self._reconnect_serial()
 
                 try:
