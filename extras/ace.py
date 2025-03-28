@@ -175,8 +175,8 @@ class DuckAce:
         # logging.info(f'[ACE] >>> {request}')
         # self.gcode.respond_info(f'[ACE] >>> {request}')
 
-        # self._send_with_retry(data)
-        self._serial.write(data)
+        self._send_with_retry(data)
+        # self._serial.write(data)
 
 
     def _main_eval(self, eventtime):
