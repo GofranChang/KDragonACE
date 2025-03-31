@@ -102,7 +102,6 @@ class DuckAce:
         self.gcode.register_command(
             'ACE_RETRACT', self.cmd_ACE_RETRACT,
             desc=self.cmd_ACE_RETRACT_help)
-        # cmd_ACE_REJECT_TOOL
         self.gcode.register_command(
             'ACE_REJECT_TOOL', self.cmd_ACE_REJECT_TOOL,
             desc=self.cmd_ACE_REJECT_TOOL_help)
@@ -112,6 +111,9 @@ class DuckAce:
         self.gcode.register_command(
             'ACE_FILAMENT_STATUS', self.cmd_ACE_FILAMENT_STATUS,
             desc=self.cmd_ACE_FILAMENT_STATUS_help)
+        self.gcode.register_command(
+            'ACE_CLEAR_ALL_STATUS', self.cmd_ACE_CLEAR_ALL_STATUS,
+            desc=self.cmd_ACE_CLEAR_ALL_STATUS_help)
         self.gcode.register_command(
             'ACE_DEBUG', self.cmd_ACE_DEBUG,
             desc=self.cmd_ACE_DEBUG_help)
@@ -126,7 +128,7 @@ class DuckAce:
             data ^= (data & 0x0f) << 4
             _crc = ((data << 8) | (_crc >> 8)) ^ (data >> 4) ^ (data << 3)
         return _crc
-    
+
 
     def _update_request_id(self):
         if self._request_id >= 16382:
@@ -141,19 +143,9 @@ class DuckAce:
                 self._serial.write(data)
                 return
             except serial.SerialException as e:
-                # self.gcode.respond_err
+                self.gcode.respond_info(f'[ACE] serial send exception {e}')
                 self._reconnect_serial()
                 self.dwell(2 ** i)
-
-
-    # def _send_with_retry(self, data, attemp=0):
-    #     if attemp > 3:
-    #         raise Exception('ACE: Send error ')
-    #     try:
-    #         self._serial.write(data)
-    #     except Exception as e:
-    #         self._reconnect_serial()
-    #         self._send_with_retry(self, data, attemp+1)
 
     def _read_with_retry(self, expected, size, retry_times=3):
         for i in range(0, retry_times):
@@ -161,23 +153,11 @@ class DuckAce:
                 ret = self._serial.read_until(expected=expected, size=size)
                 return ret
             except serial.SerialException as e:
+                self.gcode.respond_info(f'[ACE] serial read exception {e}')
                 self._reconnect_serial()
                 self.dwell(2 ** i)
 
         return None
-
-    # def _read_with_retry(self, expected, size, attemp=0):
-    #     if attemp > 3:
-    #         raise Exception('ACE: Read error')
-
-    #     try:
-    #         ret = self._serial.read_until(expected=expected, size=size)
-    #         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    #         self.gcode.respond_info(f'[ACE] Get data {now}')
-    #         return ret
-    #     except Exception as e:
-    #         self._reconnect_serial()
-    #         return self._read_with_retry(expected, size, attemp+1)
 
     def _send_request(self, request):
         if not 'id' in request:
@@ -193,10 +173,12 @@ class DuckAce:
         data += struct.pack('@H', self._calc_crc(payload))
         data += bytes([0xFE])
 
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # logging.info(f'[ACE] >>> {request}')
-        # self.gcode.respond_info(f'[ACE] >>> {request}')
+        self.gcode.respond_info(f'[ACE] {now} >>> {request}')
 
         self._send_with_retry(data)
+        # self._serial.write(data)
 
 
     def _main_eval(self, eventtime):
@@ -232,6 +214,7 @@ class DuckAce:
 
             # self.gcode.respond_info(f'[ACE] not timeout')
             ret = self._read_with_retry(expected=bytes([0xFE]), size=4096)
+            # ret = self._serial.read_until(expected=([0xFE]), size=4096)
             if None == ret:
                 return
 
@@ -247,15 +230,15 @@ class DuckAce:
             if rlen > len(ret) - 7 or rlen <= 0:
                 if rlen == len(ret) - 6:
                     crc_data = self._read_with_retry(expected=bytes([0xFE]), size=1)
-                    if None == ret:
-                        return
+                    # crc_data = self._serial.read_until(expected=([0xFE]), size=1)
                     crc_data = bytes([ret[len(ret) - 2], crc_data[0]])
                     ret = ret[0:len(ret) - 2] + bytes([ret[len(ret) - 1]])
                     crc_offset = 2
                 elif rlen == len(ret) - 5:
                     crc_data = self._read_with_retry(expected=bytes([0xFE]), size=2)
-                    if None == ret or len(crc_data) < 2:
+                    if None == crc_data or len(crc_data) < 2:
                         return
+                    # crc_data = self._serial.read_until(expected=([0xFE]), size=2)
                     # self.gcode.respond_info(f'XXXXXXXXXXXXXXXXXXXX {len(crc_data)}')
                     crc_data = bytes([crc_data[1], crc_data[0]])
                     crc_offset = 2
@@ -275,7 +258,7 @@ class DuckAce:
             ret = json.loads(rpayload.decode('utf-8'))
 
             # self._last_get_ace_response_time = time.time()
-            # self.gcode.respond_info(f'[ACE] {now} <<< {ret}')
+            self.gcode.respond_info(f'[ACE] {now} <<< {ret}')
             id = ret['id']
             if id in self._callback_map:
                 callback = self._callback_map.pop(id)
@@ -391,9 +374,8 @@ class DuckAce:
         logging.info('ACE: Closing connection to ' + self.serial_name)
         self._serial.close()
         self._connected = False
-        self._reader_thread.join()
-        self._writer_thread.join()
         self.reactor.unregister_timer(self.main_timer)
+        self.reactor.unregister_timer(self.serial_timer)
 
         self._queue = None
         self._main_queue = None
@@ -604,6 +586,11 @@ class DuckAce:
 
         self.variables['ace_current_index'] = -1
 
+    cmd_ACE_CLEAR_ALL_STATUS_help = 'Clean status'
+    def cmd_ACE_CLEAR_ALL_STATUS(self, gcmd):
+        self.variables['ace_current_index'] = -1
+        self.variables['ace_filament_pos'] = "spliter"
+
     cmd_ACE_REJECT_TOOL_help = 'Reject tool'
     def cmd_ACE_REJECT_TOOL(self, gcmd):
         tool = gcmd.get_int('TOOL', -1)
@@ -638,15 +625,14 @@ class DuckAce:
         if was != -1:
             self._reject_tool(was)
 
-            if tool != -1:
-                self._feed(tool, self.toolchange_retract_length-5, self.retract_speed)
-                self.variables['ace_filament_pos'] = "bowden"
+        if tool != -1:
+            self._feed(tool, self.toolchange_retract_length-5, self.retract_speed)
+            self.variables['ace_filament_pos'] = "bowden"
+            self.wait_ace_ready()
 
-                self.wait_ace_ready()
-
-                self._park_to_toolhead(tool)
-        else:
             self._park_to_toolhead(tool)
+        # else:
+        #     self._park_to_toolhead(tool)
 
         self.gcode.run_script_from_command('_ACE_POST_TOOLCHANGE FROM=' + str(was) + ' TO=' + str(tool))
 
