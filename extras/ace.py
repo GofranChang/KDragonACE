@@ -600,6 +600,7 @@ class DuckAce:
 
     cmd_ACE_CHANGE_TOOL_help = 'Changes tool'
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
+        self.gcode.respond_info('ACE: Changing tool...')
         tool = gcmd.get_int('TOOL')
 
         if tool < -1 or tool >= 4:
