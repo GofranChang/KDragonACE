@@ -1,4 +1,4 @@
-import serial, time, logging, json, struct, queue, traceback
+import serial, time, logging, json, struct, queue, traceback # type: ignore
 from datetime import datetime
 
 class DuckAce:
@@ -174,8 +174,8 @@ class DuckAce:
         data += bytes([0xFE])
 
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # logging.info(f'[ACE] >>> {request}')
-        self.gcode.respond_info(f'[ACE] {now} >>> {request}')
+        logging.info(f'[ACE] {now} >>> {request}')
+        # self.gcode.respond_info(f'[ACE] {now} >>> {request}')
 
         if with_retry:
             self._send_with_retry(data)
@@ -204,6 +204,7 @@ class DuckAce:
                     return
             except Exception as e:
                 logging.info(f'Reconnect attempt {attempt+1} failed: {e}')
+                self.dwell(1)
 
 
     def _reader(self):
@@ -260,13 +261,14 @@ class DuckAce:
             ret = json.loads(rpayload.decode('utf-8'))
 
             # self._last_get_ace_response_time = time.time()
-            self.gcode.respond_info(f'[ACE] {now} <<< {ret}')
+            # self.gcode.respond_info(f'[ACE] {now} <<< {ret}')
+            logging.info(f'[ACE] {now} <<< {ret}')
             id = ret['id']
             if id in self._callback_map:
                 callback = self._callback_map.pop(id)
                 callback(self = self, response = ret)
         except serial.serialutil.SerialException:
-            self._printer.invoke_shutdown(f'Lost communication with ACE "{self._name}"')
+            self._reconnect_serial()
             return
         except Exception as e:
             logging.info('ACE: Read error ' + traceback.format_exc(e))
@@ -317,7 +319,7 @@ class DuckAce:
 
             self._send_request({'id': id, 'method': 'get_status'}, with_retry=False)
         except serial.serialutil.SerialException:
-            self._printer.invoke_shutdown(f'Lost communication with ACE "{self._name}"')
+            self._reconnect_serial()
         except Exception as e:
             logging.info('ACE: Write error ' + str(e))
 
@@ -635,7 +637,7 @@ class DuckAce:
         self.variables['ace_current_index'] = tool
         # Force save to disk
         self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_current_index VALUE=' + str(tool))
-        self.gcode.run_script_from_command(f'''SAVE_VARIABLE VARIABLE=ace_filament_pos VALUE=''{self.variables['ace_filament_pos']}''''')
+        self.gcode.run_script_from_command(f"""SAVE_VARIABLE VARIABLE=ace_filament_pos VALUE='"{self.variables['ace_filament_pos']}"'""")
 
         gcmd.respond_info(f'Tool {tool} load')
 
