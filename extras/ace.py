@@ -142,7 +142,7 @@ class DuckAce:
             try:
                 self._serial.write(data)
                 return
-            except serial.SerialException as e:
+            except Exception as e:
                 self.gcode.respond_info(f'[ACE] serial send exception {e}')
                 self._reconnect_serial()
                 self.dwell(2 ** i)
@@ -152,7 +152,7 @@ class DuckAce:
             try:
                 ret = self._serial.read_until(expected=expected, size=size)
                 return ret
-            except serial.SerialException as e:
+            except Exception as e:
                 self.gcode.respond_info(f'[ACE] serial read exception {e}')
                 self._reconnect_serial()
                 # self.dwell(2 ** i)
@@ -189,7 +189,7 @@ class DuckAce:
             if task is not None:
                 task()
 
-        return eventtime + 0.25
+        return eventtime + 1
 
     def _reconnect_serial(self, max_attempts=3, delay=1):
         self._serial.close()
@@ -219,13 +219,13 @@ class DuckAce:
             ret = self._read_with_retry(expected=bytes([0xFE]), size=4096)
             # ret = self._serial.read_until(expected=([0xFE]), size=4096)
             if None == ret:
-                return
+                return None
 
             # self.gcode.respond_info(f'[ACE] readed')
 
             if not (ret[0] == 0xFF and ret[1] == 0xAA and ret[len(ret) - 1] == 0xFE):
                 self.gcode.respond_info('ACE: Invalid data recieved: ' + str(ret))
-                return
+                return None
 
             rlen = struct.unpack('@H', ret[2:4])[0]
             crc_data = None
@@ -256,7 +256,7 @@ class DuckAce:
             crc = struct.pack('@H', self._calc_crc(rpayload))
             if crc[0] != crc_data[0] or crc[1] != crc_data[1]:
                 logging.info('ACE: Invalid data CRC recieved: ' + str(ret) + ', should be: ' + str(crc))
-                return
+                return None
 
             ret = json.loads(rpayload.decode('utf-8'))
 
@@ -267,71 +267,79 @@ class DuckAce:
             if id in self._callback_map:
                 callback = self._callback_map.pop(id)
                 callback(self = self, response = ret)
+
+            return id
         except serial.serialutil.SerialException:
             self._reconnect_serial()
-            return
+            return None
         except Exception as e:
             logging.info('ACE: Read error ' + traceback.format_exc(e))
+            return None
 
 
     def _writer(self):
         try:
-            while not self._queue.empty():
+            id = self._request_id
+            self._update_request_id()
+
+            # while not self._queue.empty():
+            if not self._queue.empty():
                 task = self._queue.get()
                 if task is not None:
-                    id = self._request_id
-                    self._update_request_id()
                     self._callback_map[id] = task[1]
                     task[0]['id'] = id
 
                     self._send_request(task[0], task[2])
 
-            def callback(self, response):
-                if response is not None:
-                    self._info = response['result']
-                    # logging.info('ACE: Update status ' + str(self._request_id))
+            else:
+                def callback(self, response):
+                    if response is not None:
+                        self._info = response['result']
+                        # logging.info('ACE: Update status ' + str(self._request_id))
 
-                    if self._park_in_progress and self._info['status'] == 'ready':
-                        new_assist_count = self._info['feed_assist_count']
-                        if new_assist_count > self._last_assist_count:
-                            self._last_assist_count = new_assist_count
-                            self.dwell(0.7, True) # 0.68 + small room 0.02 for response
-                            self._assist_hit_count = 0
-                        elif self._assist_hit_count < self.park_hit_count:
-                            self._assist_hit_count += 1
-                            self.dwell(0.7, True)
-                        else:
-                            self._assist_hit_count = 0
-                            self._park_in_progress = False
-                            logging.info('ACE: Parked to toolhead with assist count: ' + str(self._last_assist_count))
-
-                            if self._park_is_toolchange:
-                                self._park_is_toolchange = False
-                                def main_callback():
-                                    self.gcode.run_script_from_command('_ACE_POST_TOOLCHANGE FROM=' + str(self._park_previous_tool) + ' TO=' + str(self._park_index))
-                                self._main_queue.put(main_callback)
+                        if self._park_in_progress and self._info['status'] == 'ready':
+                            new_assist_count = self._info['feed_assist_count']
+                            if new_assist_count > self._last_assist_count:
+                                self._last_assist_count = new_assist_count
+                                self.dwell(0.7, True) # 0.68 + small room 0.02 for response
+                                self._assist_hit_count = 0
+                            elif self._assist_hit_count < self.park_hit_count:
+                                self._assist_hit_count += 1
+                                self.dwell(0.7, True)
                             else:
-                                self._send_request({'method': 'stop_feed_assist', 'params': {'index': self._park_index}})
+                                self._assist_hit_count = 0
+                                self._park_in_progress = False
+                                logging.info('ACE: Parked to toolhead with assist count: ' + str(self._last_assist_count))
 
-            id = self._request_id
-            self._update_request_id()
-            self._callback_map[id] = callback
+                                if self._park_is_toolchange:
+                                    self._park_is_toolchange = False
+                                    def main_callback():
+                                        self.gcode.run_script_from_command('_ACE_POST_TOOLCHANGE FROM=' + str(self._park_previous_tool) + ' TO=' + str(self._park_index))
+                                    self._main_queue.put(main_callback)
+                                else:
+                                    self._send_request({'method': 'stop_feed_assist', 'params': {'index': self._park_index}})
 
-            self._send_request({'id': id, 'method': 'get_status'}, with_retry=False)
+                self._callback_map[id] = callback
+
+                self._send_request({'id': id, 'method': 'get_status'}, with_retry=False)
         except serial.serialutil.SerialException:
             self._reconnect_serial()
         except Exception as e:
             logging.info('ACE: Write error ' + str(e))
 
+        return id
+
     def _serial_read_write(self, eventtime):
         if self._connected:
-            self._writer()
-            self._reader()
+            send_id = self._writer()
+            read_id = None
+            while None == read_id or read_id != send_id:
+                read_id = self._reader()
 
         if self._park_in_progress:
             next_time = 0.68
         else:
-            next_time = 0.5
+            next_time = 1
         return eventtime + next_time
 
 
@@ -450,7 +458,7 @@ class DuckAce:
                 raise ValueError('ACE Error: ' + response['msg'])
             else:
                 self._feed_assist_index = index
-                self.gcode.respond_info(str(response))
+                # self.gcode.respond_info(str(response))
 
         self.send_request(request = {'method': 'start_feed_assist', 'params': {'index': index}}, callback = callback)
         self.dwell(delay = 0.7)
@@ -540,6 +548,9 @@ class DuckAce:
         self._retract(index, length, speed)
 
     def _park_to_toolhead(self, tool):
+        self._park_in_progress = True
+        self.dwell(1)
+
         sensor_extruder = self.printer.lookup_object('filament_switch_sensor %s' % 'extruder_sensor', None)
         sensor_toolhead = self.printer.lookup_object('filament_switch_sensor %s' % 'toolhead_sensor', None)
 
@@ -560,6 +571,8 @@ class DuckAce:
 
         # The nozzle should be cleaned by brushing
         self.variables['ace_filament_pos'] = 'nozzle'
+
+        self._park_in_progress = False
 
     def _reject_tool(self, index):
         sensor_extruder = self.printer.lookup_object('filament_switch_sensor %s' % 'extruder_sensor', None)
