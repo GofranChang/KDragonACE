@@ -182,6 +182,7 @@ class DuckAce:
         try:
             if self._serial.isOpen():
                 self._serial.close()
+                self._connected = False
 
             self._serial = serial.Serial(port=self.serial_name,
                                         baudrate=self.baud)
@@ -227,58 +228,99 @@ class DuckAce:
 
         return True
 
+    # def _reader(self):
+    #     ret = None
+    #     try:
+    #         ret = self._serial.read_until(expected=bytes([0xFE]), size=4096)
+    #     except Exception as e:
+    #         self.gcode.respond_info(f'[ACE] read exception {e}')
+    #         return None
+
+    #     if not (ret[0] == 0xFF and ret[1] == 0xAA and ret[len(ret) - 1] == 0xFE):
+    #         self.gcode.respond_info('ACE: Invalid data recieved: ' + str(ret))
+    #         return None
+
+    #     rlen = struct.unpack('@H', ret[2:4])[0]
+    #     crc_data = None
+    #     crc_offset = 0
+    #     if rlen > len(ret) - 7 or rlen <= 0:
+    #         if rlen == len(ret) - 6:
+    #             try:
+    #                 crc_data = self._serial.read_until(expected=bytes([0xFE]), size=1)
+    #             except Exception as e:
+    #                 self.gcode.respond_info(f'[ACE] read exception {e}')
+    #                 return None
+    #             crc_data = bytes([ret[len(ret) - 2], crc_data[0]])
+    #             ret = ret[0:len(ret) - 2] + bytes([ret[len(ret) - 1]])
+    #             crc_offset = 2
+    #         elif rlen == len(ret) - 5:
+    #             try:
+    #                 crc_data = self._serial.read_until(expected=bytes([0xFE]), size=2)
+    #             except Exception as e:
+    #                 self.gcode.respond_info(f'[ACE] read exception {e}')
+    #                 return None
+
+    #             if None == crc_data or len(crc_data) < 2:
+    #                 return None
+
+    #             crc_data = bytes([crc_data[1], crc_data[0]])
+    #             crc_offset = 2
+    #         else:
+    #             logging.info('ACE: Invalid data length recieved: ' + str(rlen) + ' | ' + str(len(ret)) + ', ' + str(ret))
+    #             return None
+
+    #     if crc_data is None:
+    #         crc_data = ret[len(ret) - 3:len(ret) - 1]
+
+    #     rpayload = ret[4:(len(ret) - 3 + crc_offset)]
+    #     crc = struct.pack('@H', self._calc_crc(rpayload))
+    #     if crc[0] != crc_data[0] or crc[1] != crc_data[1]:
+    #             logging.info('ACE: Invalid data CRC recieved: ' + str(ret) + ', should be: ' + str(crc))
+    #             return None
+
+    #     ret = json.loads(rpayload.decode('utf-8'))
+
+    #     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    #     logging.info(f'[ACE] {now} <<< {ret}')
+    #     id = ret['id']
+    #     if id in self._callback_map:
+    #         callback = self._callback_map.pop(id)
+    #         callback(self = self, response = ret)
+
+    #     return id
+
     def _reader(self):
-        ret = None
+        data = None
         try:
-            ret = self._serial.read_until(expected=bytes([0xFE]), size=4096)
+            data = self._serial.read_until(expected=bytes([0xFE]), size=4096)
         except Exception as e:
             self.gcode.respond_info(f'[ACE] read exception {e}')
             return None
 
-        if not (ret[0] == 0xFF and ret[1] == 0xAA and ret[len(ret) - 1] == 0xFE):
-            self.gcode.respond_info('ACE: Invalid data recieved: ' + str(ret))
+        if None == data or len(data) < 7:
+            logging.info(f'[ACE] Read too short')
+            return None
+        
+        if data[0:2] != b"\xFF\xAA":
+            logging.info(f'[ACE] Read invalid header')
+            return None
+        
+        payload_length = struct.unpack("@H", data[2:4])[0]
+        payload = data[4 : 4 + payload_length]
+        crc_received = data[4 + payload_length : 4 + payload_length + 2]
+
+        calculated_crc = self._calc_crc(payload)
+        if calculated_crc != crc_received:
+            logging.info(f'[ACE] Read invalid CRC')
             return None
 
-        rlen = struct.unpack('@H', ret[2:4])[0]
-        crc_data = None
-        crc_offset = 0
-        if rlen > len(ret) - 7 or rlen <= 0:
-            if rlen == len(ret) - 6:
-                try:
-                    crc_data = self._serial.read_until(expected=bytes([0xFE]), size=1)
-                except Exception as e:
-                    self.gcode.respond_info(f'[ACE] read exception {e}')
-                    return None
-                crc_data = bytes([ret[len(ret) - 2], crc_data[0]])
-                ret = ret[0:len(ret) - 2] + bytes([ret[len(ret) - 1]])
-                crc_offset = 2
-            elif rlen == len(ret) - 5:
-                try:
-                    crc_data = self._serial.read_until(expected=bytes([0xFE]), size=2)
-                except Exception as e:
-                    self.gcode.respond_info(f'[ACE] read exception {e}')
-                    return None
-
-                if None == crc_data or len(crc_data) < 2:
-                    return None
-
-                crc_data = bytes([crc_data[1], crc_data[0]])
-                crc_offset = 2
-            else:
-                logging.info('ACE: Invalid data length recieved: ' + str(rlen) + ' | ' + str(len(ret)) + ', ' + str(ret))
-                return None
-
-        if crc_data is None:
-            crc_data = ret[len(ret) - 3:len(ret) - 1]
-
-        rpayload = ret[4:(len(ret) - 3 + crc_offset)]
-        crc = struct.pack('@H', self._calc_crc(rpayload))
-        if crc[0] != crc_data[0] or crc[1] != crc_data[1]:
-                logging.info('ACE: Invalid data CRC recieved: ' + str(ret) + ', should be: ' + str(crc))
-                return None
-
-        ret = json.loads(rpayload.decode('utf-8'))
-
+        try:
+            json_str = payload.decode("utf-8")
+            ret = json.loads(json_str)
+        except Exception as e:
+            logging.info(f'[ACE] Read invalid JSON')
+            return None
+        
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         logging.info(f'[ACE] {now} <<< {ret}')
         id = ret['id']
@@ -288,31 +330,25 @@ class DuckAce:
 
         return id
 
-
     def _writer(self):
-        try:
-            id = self._update_and_get_request_id()
+        id = self._update_and_get_request_id()
 
-            if not self._queue.empty():
-                task = self._queue.get()
-                if task is not None:
-                    self._callback_map[id] = task[1]
-                    task[0]['id'] = id
+        if not self._queue.empty():
+            task = self._queue.get()
+            if task is not None:
+                self._callback_map[id] = task[1]
+                task[0]['id'] = id
 
-                    if not self._write_serial(task[0]):
-                        if task[2]:
-                            # TODO: Retry
-                            pass
+                if not self._write_serial(task[0]):
+                    if task[2]:
+                        # TODO: Retry
+                        pass
 
-                        return None
-
-            else:
-                if not self._send_heartbeat(id):
                     return None
 
-        except Exception as e:
-            logging.info('ACE: Write error ' + str(e))
-            return None
+        else:
+            if not self._send_heartbeat(id):
+                return None
 
         return id
 
@@ -327,7 +363,6 @@ class DuckAce:
             if read_id != send_id:
                 self._connected = False
                 return eventtime + 1
-
         else:
             self._reconnect_serial()
             return eventtime + 1
@@ -343,20 +378,10 @@ class DuckAce:
 
         logging.info('ACE: Connecting to ' + self.serial_name)
 
-        # We can catch timing where ACE reboots itself when no data is available from host. We're avoiding it with this hack
         self._connected = False
-        for i in range(0, 10):
-            try:
-                self._serial = serial.Serial(
-                    port          = self.serial_name,
-                    baudrate      = self.baud)
-
-                if self._serial.isOpen():
-                    self._connected = True
-                    break
-            except serial.serialutil.SerialException:
-                time.sleep(0.5)
-                continue
+        while not self._connected:
+            self._reconnect_serial()
+            self.reactor.pause(0.5)
 
         if not self._connected:
             raise ValueError('ACE: Failed to connect to ' + self.serial_name)
@@ -364,10 +389,9 @@ class DuckAce:
         logging.info('ACE: Connected to ' + self.serial_name)
 
         self._queue = queue.Queue()
-        self._main_queue = queue.Queue()
-
         self.serial_timer = self.reactor.register_timer(self._serial_read_write, self.reactor.NOW)
 
+        self._main_queue = queue.Queue()
         self.main_timer = self.reactor.register_timer(self._main_eval, self.reactor.NOW)
 
         def info_callback(self, response):
@@ -380,11 +404,12 @@ class DuckAce:
         logging.info('ACE: Closing connection to ' + self.serial_name)
         self._serial.close()
         self._connected = False
+
+        self._main_queue = None
         self.reactor.unregister_timer(self.main_timer)
-        self.reactor.unregister_timer(self.serial_timer)
 
         self._queue = None
-        self._main_queue = None
+        self.reactor.unregister_timer(self.serial_timer)
 
     def wait_ace_ready(self):
         while self._info['status'] != 'ready':
