@@ -23,7 +23,6 @@ class DuckAce:
         self._callback_map = {}
         self.park_hit_count = 5
         self._feed_assist_index = -1
-        self._request_id = 0
         self._last_assist_count = 0
         self._assist_hit_count = 0
         self._park_in_progress = False
@@ -129,40 +128,22 @@ class DuckAce:
             _crc = ((data << 8) | (_crc >> 8)) ^ (data >> 4) ^ (data << 3)
         return _crc
 
+    def _update_and_get_request_id(self):
+        if not hasattr(self._update_and_get_request_id, 'id'):
+            self._update_and_get_request_id.id = 0
+            return 0
 
-    def _update_request_id(self):
-        if self._request_id >= 16382:
-            # self._reconnect_serial()
-            self._request_id = 0
+        if self._update_and_get_request_id.id >= 16382:
+            self._update_and_get_request_id.id = 0
         else:
-            self._request_id += 1
+            self._update_and_get_request_id.id += 1
 
-    def _send_with_retry(self, data, retry_times=3):
-        for i in range(0, retry_times):
-            try:
-                self._serial.write(data)
-                return
-            except Exception as e:
-                self.gcode.respond_info(f'[ACE] serial send exception {e}')
-                self._reconnect_serial()
-                self.dwell(2 ** i)
+        return self._update_and_get_request_id.id
 
-    def _read_with_retry(self, expected, size, retry_times=3):
-        for i in range(0, retry_times):
-            try:
-                ret = self._serial.read_until(expected=expected, size=size)
-                return ret
-            except Exception as e:
-                self.gcode.respond_info(f'[ACE] serial read exception {e}')
-                self._reconnect_serial()
-                # self.dwell(2 ** i)
 
-        return None
-
-    def _send_request(self, request, with_retry=True):
+    def _write_serial(self, request):
         if not 'id' in request:
-            request['id'] = self._request_id
-            self._update_request_id()
+            request['id'] = self._update_and_get_request_id()
 
         payload = json.dumps(request)
         payload = bytes(payload, 'utf-8')
@@ -175,12 +156,14 @@ class DuckAce:
 
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         logging.info(f'[ACE] {now} >>> {request}')
-        # self.gcode.respond_info(f'[ACE] {now} >>> {request}')
 
-        if with_retry:
-            self._send_with_retry(data)
-        else:
+        try:
             self._serial.write(data)
+        except Exception as e:
+            self.gcode.respond_info(f'[ACE] serial write exception {e}')
+            return False
+
+        return True
 
 
     def _main_eval(self, eventtime):
@@ -189,159 +172,171 @@ class DuckAce:
             if task is not None:
                 task()
 
-        return eventtime + 1
+        return eventtime + 0.25
 
-    def _reconnect_serial(self, max_attempts=3, delay=1):
-        self._serial.close()
+    def _reconnect_serial(self):
+        if self._connected:
+            self.gcode.respond_warn('[ACE] reconnect warning: serial port already connected')
+            return True
 
-        for attempt in range(max_attempts):
-            try:
-                logging.info(f'Attempt {attempt+1} to reconnect...')
-                self._serial = serial.Serial(port=self.serial_name,
-                                            baudrate=self.baud)
-                if self._serial.isOpen():
-                    logging.info('Reconnected successfully.')
-                    return
-            except Exception as e:
-                logging.info(f'Reconnect attempt {attempt+1} failed: {e}')
-                self.dwell(1)
+        try:
+            if self._serial.isOpen():
+                self._serial.close()
 
+            self._serial = serial.Serial(port=self.serial_name,
+                                        baudrate=self.baud)
+            if self._serial.isOpen():
+                self._connected = True
+                self.gcode.respond_info('[ACE] Reconnected successfully.')
+                return True
+        except Exception as e:
+            logging.warning(f'[ACE] reconnect error: {e}')
+
+        return False
+
+    def _send_heartbeat(self, id):
+        def callback(self, response):
+            if response is not None:
+                self._info = response['result']
+
+                if self._park_in_progress and self._info['status'] == 'ready':
+                    new_assist_count = self._info['feed_assist_count']
+                    if new_assist_count > self._last_assist_count:
+                        self._last_assist_count = new_assist_count
+                        self.dwell(0.7, True) # 0.68 + small room 0.02 for response
+                        self._assist_hit_count = 0
+                    elif self._assist_hit_count < self.park_hit_count:
+                        self._assist_hit_count += 1
+                        self.dwell(0.7, True)
+                    else:
+                        self._assist_hit_count = 0
+                        self._park_in_progress = False
+                        logging.info('ACE: Parked to toolhead with assist count: ' + str(self._last_assist_count))
+
+                        if self._park_is_toolchange:
+                            self._park_is_toolchange = False
+                            def main_callback():
+                                self.gcode.run_script_from_command('_ACE_POST_TOOLCHANGE FROM=' + str(self._park_previous_tool) + ' TO=' + str(self._park_index))
+                            self._main_queue.put(main_callback)
+                        else:
+                            self.send_request(request = {'method': 'stop_feed_assist', 'params': {'index': self._park_index}}, callback=None)
+
+        self._callback_map[id] = callback
+        if not self._write_serial({'id': id, 'method': 'get_status'}):
+            return False
+
+        return True
 
     def _reader(self):
+        ret = None
         try:
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            # self.gcode.respond_info(f'[ACE] {now} isconnected')
-            if None != self._last_get_ace_response_time and time.time() - self._last_get_ace_response_time > 2:
-                self.gcode.respond_info(f'[ACE] {self._last_get_ace_response_time} {time.time()}')
-                self._reconnect_serial()
+            ret = self._serial.read_until(expected=bytes([0xFE]), size=4096)
+        except Exception as e:
+            self.gcode.respond_info(f'[ACE] read exception {e}')
+            return None
 
-            # self.gcode.respond_info(f'[ACE] not timeout')
-            ret = self._read_with_retry(expected=bytes([0xFE]), size=4096)
-            # ret = self._serial.read_until(expected=([0xFE]), size=4096)
-            if None == ret:
+        if not (ret[0] == 0xFF and ret[1] == 0xAA and ret[len(ret) - 1] == 0xFE):
+            self.gcode.respond_info('ACE: Invalid data recieved: ' + str(ret))
+            return None
+
+        rlen = struct.unpack('@H', ret[2:4])[0]
+        crc_data = None
+        crc_offset = 0
+        if rlen > len(ret) - 7 or rlen <= 0:
+            if rlen == len(ret) - 6:
+                try:
+                    crc_data = self._serial.read_until(expected=bytes([0xFE]), size=1)
+                except Exception as e:
+                    self.gcode.respond_info(f'[ACE] read exception {e}')
+                    return None
+                crc_data = bytes([ret[len(ret) - 2], crc_data[0]])
+                ret = ret[0:len(ret) - 2] + bytes([ret[len(ret) - 1]])
+                crc_offset = 2
+            elif rlen == len(ret) - 5:
+                try:
+                    crc_data = self._serial.read_until(expected=bytes([0xFE]), size=2)
+                except Exception as e:
+                    self.gcode.respond_info(f'[ACE] read exception {e}')
+                    return None
+
+                if None == crc_data or len(crc_data) < 2:
+                    return None
+
+                crc_data = bytes([crc_data[1], crc_data[0]])
+                crc_offset = 2
+            else:
+                logging.info('ACE: Invalid data length recieved: ' + str(rlen) + ' | ' + str(len(ret)) + ', ' + str(ret))
                 return None
 
-            # self.gcode.respond_info(f'[ACE] readed')
+        if crc_data is None:
+            crc_data = ret[len(ret) - 3:len(ret) - 1]
 
-            if not (ret[0] == 0xFF and ret[1] == 0xAA and ret[len(ret) - 1] == 0xFE):
-                self.gcode.respond_info('ACE: Invalid data recieved: ' + str(ret))
-                return None
-
-            rlen = struct.unpack('@H', ret[2:4])[0]
-            crc_data = None
-            crc_offset = 0
-            if rlen > len(ret) - 7 or rlen <= 0:
-                if rlen == len(ret) - 6:
-                    crc_data = self._read_with_retry(expected=bytes([0xFE]), size=1)
-                    # crc_data = self._serial.read_until(expected=([0xFE]), size=1)
-                    crc_data = bytes([ret[len(ret) - 2], crc_data[0]])
-                    ret = ret[0:len(ret) - 2] + bytes([ret[len(ret) - 1]])
-                    crc_offset = 2
-                elif rlen == len(ret) - 5:
-                    crc_data = self._read_with_retry(expected=bytes([0xFE]), size=2)
-                    if None == crc_data or len(crc_data) < 2:
-                        return
-                    # crc_data = self._serial.read_until(expected=([0xFE]), size=2)
-                    # self.gcode.respond_info(f'XXXXXXXXXXXXXXXXXXXX {len(crc_data)}')
-                    crc_data = bytes([crc_data[1], crc_data[0]])
-                    crc_offset = 2
-                else:
-                    logging.info('ACE: Invalid data length recieved: ' + str(rlen) + ' | ' + str(len(ret)) + ', ' + str(ret))
-                    return
-
-            if crc_data is None:
-                crc_data = ret[len(ret) - 3:len(ret) - 1]
-
-            rpayload = ret[4:(len(ret) - 3 + crc_offset)]
-            crc = struct.pack('@H', self._calc_crc(rpayload))
-            if crc[0] != crc_data[0] or crc[1] != crc_data[1]:
+        rpayload = ret[4:(len(ret) - 3 + crc_offset)]
+        crc = struct.pack('@H', self._calc_crc(rpayload))
+        if crc[0] != crc_data[0] or crc[1] != crc_data[1]:
                 logging.info('ACE: Invalid data CRC recieved: ' + str(ret) + ', should be: ' + str(crc))
                 return None
 
-            ret = json.loads(rpayload.decode('utf-8'))
+        ret = json.loads(rpayload.decode('utf-8'))
 
-            # self._last_get_ace_response_time = time.time()
-            # self.gcode.respond_info(f'[ACE] {now} <<< {ret}')
-            logging.info(f'[ACE] {now} <<< {ret}')
-            id = ret['id']
-            if id in self._callback_map:
-                callback = self._callback_map.pop(id)
-                callback(self = self, response = ret)
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        logging.info(f'[ACE] {now} <<< {ret}')
+        id = ret['id']
+        if id in self._callback_map:
+            callback = self._callback_map.pop(id)
+            callback(self = self, response = ret)
 
-            return id
-        except serial.serialutil.SerialException:
-            self._reconnect_serial()
-            return None
-        except Exception as e:
-            logging.info('ACE: Read error ' + traceback.format_exc(e))
-            return None
+        return id
 
 
     def _writer(self):
         try:
-            id = self._request_id
-            self._update_request_id()
+            id = self._update_and_get_request_id()
 
-            # while not self._queue.empty():
             if not self._queue.empty():
                 task = self._queue.get()
                 if task is not None:
                     self._callback_map[id] = task[1]
                     task[0]['id'] = id
 
-                    self._send_request(task[0], task[2])
+                    if not self._write_serial(task[0]):
+                        if task[2]:
+                            # TODO: Retry
+                            pass
+
+                        return None
 
             else:
-                def callback(self, response):
-                    if response is not None:
-                        self._info = response['result']
-                        # logging.info('ACE: Update status ' + str(self._request_id))
+                if not self._send_heartbeat(id):
+                    return None
 
-                        if self._park_in_progress and self._info['status'] == 'ready':
-                            new_assist_count = self._info['feed_assist_count']
-                            if new_assist_count > self._last_assist_count:
-                                self._last_assist_count = new_assist_count
-                                self.dwell(0.7, True) # 0.68 + small room 0.02 for response
-                                self._assist_hit_count = 0
-                            elif self._assist_hit_count < self.park_hit_count:
-                                self._assist_hit_count += 1
-                                self.dwell(0.7, True)
-                            else:
-                                self._assist_hit_count = 0
-                                self._park_in_progress = False
-                                logging.info('ACE: Parked to toolhead with assist count: ' + str(self._last_assist_count))
-
-                                if self._park_is_toolchange:
-                                    self._park_is_toolchange = False
-                                    def main_callback():
-                                        self.gcode.run_script_from_command('_ACE_POST_TOOLCHANGE FROM=' + str(self._park_previous_tool) + ' TO=' + str(self._park_index))
-                                    self._main_queue.put(main_callback)
-                                else:
-                                    self._send_request({'method': 'stop_feed_assist', 'params': {'index': self._park_index}})
-
-                self._callback_map[id] = callback
-
-                self._send_request({'id': id, 'method': 'get_status'}, with_retry=False)
-        except serial.serialutil.SerialException:
-            self._reconnect_serial()
         except Exception as e:
             logging.info('ACE: Write error ' + str(e))
+            return None
 
         return id
 
     def _serial_read_write(self, eventtime):
         if self._connected:
             send_id = self._writer()
-            read_id = None
-            while None == read_id or read_id != send_id:
-                read_id = self._reader()
+            if None == send_id:
+                self._connected = False
+                return eventtime + 1
+
+            read_id = self._reader()
+            if read_id != send_id:
+                self._connected = False
+                return eventtime + 1
+
+        else:
+            self._reconnect_serial()
+            return eventtime + 1
 
         if self._park_in_progress:
             next_time = 0.68
         else:
-            next_time = 1
+            next_time = 0.25
         return eventtime + next_time
-
 
     def _handle_ready(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -548,9 +543,6 @@ class DuckAce:
         self._retract(index, length, speed)
 
     def _park_to_toolhead(self, tool):
-        self._park_in_progress = True
-        self.dwell(1)
-
         sensor_extruder = self.printer.lookup_object('filament_switch_sensor %s' % 'extruder_sensor', None)
         sensor_toolhead = self.printer.lookup_object('filament_switch_sensor %s' % 'toolhead_sensor', None)
 
@@ -571,8 +563,6 @@ class DuckAce:
 
         # The nozzle should be cleaned by brushing
         self.variables['ace_filament_pos'] = 'nozzle'
-
-        self._park_in_progress = False
 
     def _reject_tool(self, index):
         sensor_extruder = self.printer.lookup_object('filament_switch_sensor %s' % 'extruder_sensor', None)
