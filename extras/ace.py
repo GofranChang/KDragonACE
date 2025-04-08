@@ -1,6 +1,13 @@
 import serial, time, logging, json, struct, queue, traceback # type: ignore
 from datetime import datetime
 
+class PeekableQueue(queue.Queue):
+    def peek(self):
+        with self.mutex:  # 使用内部锁保证线程安全
+            if len(self.queue) == 0:
+                return None
+            return self.queue[0] 
+
 class DuckAce:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -334,17 +341,19 @@ class DuckAce:
         id = self._update_and_get_request_id()
 
         if not self._queue.empty():
-            task = self._queue.get()
+            task = self._queue.peek()
             if task is not None:
-                self._callback_map[id] = task[1]
                 task[0]['id'] = id
+                self._callback_map[id] = task[1]
 
                 if not self._write_serial(task[0]):
-                    if task[2]:
-                        # TODO: Retry
-                        pass
+                    if not task[2]:
+                        # Not Retry
+                        self._queue.get()
 
                     return None
+
+                self._queue.get()
 
         else:
             if not self._send_heartbeat(id):
@@ -388,7 +397,7 @@ class DuckAce:
 
         logging.info('ACE: Connected to ' + self.serial_name)
 
-        self._queue = queue.Queue()
+        self._queue = queue.PeekableQueue()
         self.serial_timer = self.reactor.register_timer(self._serial_read_write, self.reactor.NOW)
 
         self._main_queue = queue.Queue()
