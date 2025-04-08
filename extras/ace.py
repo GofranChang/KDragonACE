@@ -136,16 +136,12 @@ class DuckAce:
         return _crc
 
     def _update_and_get_request_id(self):
-        if not hasattr(self._update_and_get_request_id, 'id'):
-            self._update_and_get_request_id.id = 0
-            return 0
-
-        if self._update_and_get_request_id.id >= 16382:
-            self._update_and_get_request_id.id = 0
+        if self._request_id >= 16382:
+            self._request_id = 0
         else:
-            self._update_and_get_request_id.id += 1
+            self._request_id += 1
 
-        return self._update_and_get_request_id.id
+        return self._request_id
 
 
     def _write_serial(self, request):
@@ -187,7 +183,7 @@ class DuckAce:
             return True
 
         try:
-            if self._serial.isOpen():
+            if self._serial != None and self._serial.isOpen():
                 self._serial.close()
                 self._connected = False
 
@@ -316,10 +312,10 @@ class DuckAce:
         payload = data[4 : 4 + payload_length]
         crc_received = data[4 + payload_length : 4 + payload_length + 2]
 
-        calculated_crc = self._calc_crc(payload)
-        if calculated_crc != crc_received:
-            logging.info(f'[ACE] Read invalid CRC')
-            return None
+        # calculated_crc = self._calc_crc(payload)
+        # if calculated_crc != crc_received:
+        #     logging.info(f'[ACE] Read invalid CRC')
+        #     return None
 
         try:
             json_str = payload.decode("utf-8")
@@ -387,7 +383,9 @@ class DuckAce:
 
         logging.info('ACE: Connecting to ' + self.serial_name)
 
+        self._request_id = 0
         self._connected = False
+        self._serial = None
         while not self._connected:
             self._reconnect_serial()
             self.reactor.pause(0.5)
@@ -397,7 +395,7 @@ class DuckAce:
 
         logging.info('ACE: Connected to ' + self.serial_name)
 
-        self._queue = queue.PeekableQueue()
+        self._queue = PeekableQueue()
         self.serial_timer = self.reactor.register_timer(self._serial_read_write, self.reactor.NOW)
 
         self._main_queue = queue.Queue()
