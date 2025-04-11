@@ -6,7 +6,7 @@ class PeekableQueue(queue.Queue):
         with self.mutex:  # 使用内部锁保证线程安全
             if len(self.queue) == 0:
                 return None
-            return self.queue[0] 
+            return self.queue[0]
 
 class DuckAce:
     def __init__(self, config):
@@ -124,7 +124,45 @@ class DuckAce:
             'ACE_DEBUG', self.cmd_ACE_DEBUG,
             desc=self.cmd_ACE_DEBUG_help)
 
+    def _handle_ready(self):
+        self.toolhead = self.printer.lookup_object('toolhead')
 
+        logging.info('ACE: Connecting to ' + self.serial_name)
+
+        self._request_id = 0
+        self._connected = False
+        self._serial = None
+        while not self._connected:
+            self._reconnect_serial()
+            self.reactor.pause(0.5)
+
+        if not self._connected:
+            raise ValueError('ACE: Failed to connect to ' + self.serial_name)
+
+        logging.info('ACE: Connected to ' + self.serial_name)
+
+        self._queue = PeekableQueue()
+        self.serial_timer = self.reactor.register_timer(self._serial_read_write, self.reactor.NOW)
+
+        self._main_queue = queue.Queue()
+        self.main_timer = self.reactor.register_timer(self._main_eval, self.reactor.NOW)
+
+        def info_callback(self, response):
+            res = response['result']
+            self.gcode.respond_info('Connected ' + res['model'] + ' ' + res['firmware'])
+        self.send_request(request = {'method': 'get_info'}, callback = info_callback)
+
+
+    def _handle_disconnect(self):
+        logging.info('ACE: Closing connection to ' + self.serial_name)
+        self._serial.close()
+        self._connected = False
+
+        self._main_queue = None
+        self.reactor.unregister_timer(self.main_timer)
+
+        self._queue = None
+        self.reactor.unregister_timer(self.serial_timer)
 
     def _calc_crc(self, buffer):
         _crc = 0xffff
@@ -294,20 +332,26 @@ class DuckAce:
 
     def _reader(self):
         data = None
-        try:
-            data = self._serial.read_until(expected=bytes([0xFE]), size=4096)
-        except Exception as e:
-            self.gcode.respond_info(f'[ACE] read exception {e}')
-            return None
+
+        for i in range(0, 2):
+            try:
+                data = self._serial.read_until(expected=bytes([0xFE]), size=4096)
+            except Exception as e:
+                self.gcode.respond_info(f'[ACE] read exception {e}')
+                return None
+
+            if None != data and len(data) >= 7:
+                logging.info(f'[ACE] Read too short')
+                break
 
         if None == data or len(data) < 7:
-            logging.info(f'[ACE] Read too short')
+            logging.info(f'[ACE] Read Too short')
             return None
-        
+
         if data[0:2] != b"\xFF\xAA":
             logging.info(f'[ACE] Read invalid header')
             return None
-        
+
         payload_length = struct.unpack("@H", data[2:4])[0]
         payload = data[4 : 4 + payload_length]
         crc_received = data[4 + payload_length : 4 + payload_length + 2]
@@ -323,7 +367,7 @@ class DuckAce:
         except Exception as e:
             logging.info(f'[ACE] Read invalid JSON')
             return None
-        
+
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         logging.info(f'[ACE] {now} <<< {ret}')
         id = ret['id']
@@ -377,46 +421,6 @@ class DuckAce:
         else:
             next_time = 0.25
         return eventtime + next_time
-
-    def _handle_ready(self):
-        self.toolhead = self.printer.lookup_object('toolhead')
-
-        logging.info('ACE: Connecting to ' + self.serial_name)
-
-        self._request_id = 0
-        self._connected = False
-        self._serial = None
-        while not self._connected:
-            self._reconnect_serial()
-            self.reactor.pause(0.5)
-
-        if not self._connected:
-            raise ValueError('ACE: Failed to connect to ' + self.serial_name)
-
-        logging.info('ACE: Connected to ' + self.serial_name)
-
-        self._queue = PeekableQueue()
-        self.serial_timer = self.reactor.register_timer(self._serial_read_write, self.reactor.NOW)
-
-        self._main_queue = queue.Queue()
-        self.main_timer = self.reactor.register_timer(self._main_eval, self.reactor.NOW)
-
-        def info_callback(self, response):
-            res = response['result']
-            self.gcode.respond_info('Connected ' + res['model'] + ' ' + res['firmware'])
-        self.send_request(request = {'method': 'get_info'}, callback = info_callback)
-
-
-    def _handle_disconnect(self):
-        logging.info('ACE: Closing connection to ' + self.serial_name)
-        self._serial.close()
-        self._connected = False
-
-        self._main_queue = None
-        self.reactor.unregister_timer(self.main_timer)
-
-        self._queue = None
-        self.reactor.unregister_timer(self.serial_timer)
 
     def wait_ace_ready(self):
         while self._info['status'] != 'ready':
