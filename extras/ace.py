@@ -341,7 +341,6 @@ class DuckAce:
                 return None
 
             if None != data and len(data) >= 7:
-                logging.info(f'[ACE] Read too short')
                 break
 
         if None == data or len(data) < 7:
