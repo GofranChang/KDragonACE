@@ -26,6 +26,7 @@ class DuckAce:
         self.retract_speed = config.getint('retract_speed', 50)
         self.toolchange_retract_length = config.getint('toolchange_retract_length', 100)
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
+        self.disable_assist_after_toolchange = config.getboolean('disable_assist_after_toolchange', False)
 
         self._callback_map = {}
         self.park_hit_count = 5
@@ -90,6 +91,10 @@ class DuckAce:
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self.printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
 
+        self.gcode.register_command(
+            'ACE_GET_CUR_INDEX', self.cmd_ACE_GET_CUR_INDEX,
+            desc=self.cmd_ACE_GET_CUR_INDEX_help
+        )
         self.gcode.register_command(
             'ACE_START_DRYING', self.cmd_ACE_START_DRYING,
             desc=self.cmd_ACE_START_DRYING_help)
@@ -229,6 +234,9 @@ class DuckAce:
                                         baudrate=self.baud)
             if self._serial.isOpen():
                 self._connected = True
+
+                if self._feed_assist_index != -1:
+                    self._enable_feed_assist(self._feed_assist_index)
                 self.gcode.respond_info('[ACE] Reconnected successfully.')
                 return True
         except Exception as e:
@@ -269,67 +277,6 @@ class DuckAce:
 
         return True
 
-    # def _reader(self):
-    #     ret = None
-    #     try:
-    #         ret = self._serial.read_until(expected=bytes([0xFE]), size=4096)
-    #     except Exception as e:
-    #         self.gcode.respond_info(f'[ACE] read exception {e}')
-    #         return None
-
-    #     if not (ret[0] == 0xFF and ret[1] == 0xAA and ret[len(ret) - 1] == 0xFE):
-    #         self.gcode.respond_info('ACE: Invalid data recieved: ' + str(ret))
-    #         return None
-
-    #     rlen = struct.unpack('@H', ret[2:4])[0]
-    #     crc_data = None
-    #     crc_offset = 0
-    #     if rlen > len(ret) - 7 or rlen <= 0:
-    #         if rlen == len(ret) - 6:
-    #             try:
-    #                 crc_data = self._serial.read_until(expected=bytes([0xFE]), size=1)
-    #             except Exception as e:
-    #                 self.gcode.respond_info(f'[ACE] read exception {e}')
-    #                 return None
-    #             crc_data = bytes([ret[len(ret) - 2], crc_data[0]])
-    #             ret = ret[0:len(ret) - 2] + bytes([ret[len(ret) - 1]])
-    #             crc_offset = 2
-    #         elif rlen == len(ret) - 5:
-    #             try:
-    #                 crc_data = self._serial.read_until(expected=bytes([0xFE]), size=2)
-    #             except Exception as e:
-    #                 self.gcode.respond_info(f'[ACE] read exception {e}')
-    #                 return None
-
-    #             if None == crc_data or len(crc_data) < 2:
-    #                 return None
-
-    #             crc_data = bytes([crc_data[1], crc_data[0]])
-    #             crc_offset = 2
-    #         else:
-    #             logging.info('ACE: Invalid data length recieved: ' + str(rlen) + ' | ' + str(len(ret)) + ', ' + str(ret))
-    #             return None
-
-    #     if crc_data is None:
-    #         crc_data = ret[len(ret) - 3:len(ret) - 1]
-
-    #     rpayload = ret[4:(len(ret) - 3 + crc_offset)]
-    #     crc = struct.pack('@H', self._calc_crc(rpayload))
-    #     if crc[0] != crc_data[0] or crc[1] != crc_data[1]:
-    #             logging.info('ACE: Invalid data CRC recieved: ' + str(ret) + ', should be: ' + str(crc))
-    #             return None
-
-    #     ret = json.loads(rpayload.decode('utf-8'))
-
-    #     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    #     logging.info(f'[ACE] {now} <<< {ret}')
-    #     id = ret['id']
-    #     if id in self._callback_map:
-    #         callback = self._callback_map.pop(id)
-    #         callback(self = self, response = ret)
-
-    #     return id
-
     def _reader(self):
         data = None
 
@@ -353,7 +300,7 @@ class DuckAce:
 
         payload_length = struct.unpack("@H", data[2:4])[0]
         payload = data[4 : 4 + payload_length]
-        crc_received = data[4 + payload_length : 4 + payload_length + 2]
+        # crc_received = data[4 + payload_length : 4 + payload_length + 2]
 
         # calculated_crc = self._calc_crc(payload)
         # if calculated_crc != crc_received:
@@ -372,7 +319,8 @@ class DuckAce:
         id = ret['id']
         if id in self._callback_map:
             callback = self._callback_map.pop(id)
-            callback(self = self, response = ret)
+            if callback != None:
+                callback(self = self, response = ret)
 
         return id
 
@@ -452,6 +400,104 @@ class DuckAce:
         config.fileconfig.set(section, 'pause_on_runout', 'False')
         fs = self.printer.load_object(config, section)
 
+    def _feed(self, index, length, speed):
+        def callback(self, response):
+            if 'code' in response and response['code'] != 0:
+                raise ValueError('ACE Error: ' + response['msg'])
+
+        self.send_request(request = {'method': 'feed_filament', 'params': {'index': index, 'length': length, 'speed': speed}}, callback = callback)
+        self.dwell(delay = (length / speed) + 0.1)
+
+    def _retract(self, index, length, speed):
+        def callback(self, response):
+            if 'code' in response and response['code'] != 0:
+                raise ValueError('ACE Error: ' + response['msg'])
+
+        self.send_request(
+            request={'method': 'unwind_filament', 'params': {'index': index, 'length': length, 'speed': speed}},
+            callback=callback)
+        self.dwell(delay=(length / speed) + 0.1)
+
+    def _enable_feed_assist(self, index):
+        def callback(self, response):
+            if 'code' in response and response['code'] != 0:
+                raise ValueError('ACE Error: ' + response['msg'])
+            else:
+                self._feed_assist_index = index
+                # self.gcode.respond_info(str(response))
+
+        self.send_request(request = {'method': 'start_feed_assist', 'params': {'index': index}}, callback = callback)
+        self.dwell(delay = 0.7)
+
+    def _disable_feed_assist(self, index):
+        def callback(self, response):
+            if 'code' in response and response['code'] != 0:
+                raise self.gcode.error('ACE Error: ' + response['msg'])
+
+            self._feed_assist_index = -1
+            self.gcode.respond_info('Disabled ACE feed assist')
+
+        self.send_request(request = {'method': 'stop_feed_assist', 'params': {'index': index}}, callback = callback)
+        self.dwell(0.3)
+
+    def _park_to_toolhead(self, tool):
+        sensor_extruder = self.printer.lookup_object('filament_switch_sensor %s' % 'extruder_sensor', None)
+        sensor_toolhead = self.printer.lookup_object('filament_switch_sensor %s' % 'toolhead_sensor', None)
+
+        self._enable_feed_assist(tool)
+
+        while not bool(sensor_extruder.runout_helper.filament_present):
+            self.dwell(delay=0.1)
+
+        if not bool(sensor_extruder.runout_helper.filament_present):
+            raise ValueError('Filament stuck ' + str(bool(sensor_extruder.runout_helper.filament_present)))
+        else:
+            self.variables['ace_filament_pos'] = 'spliter'
+
+        while not bool(sensor_toolhead.runout_helper.filament_present):
+            self._extruder_move(1, 5)
+
+        self.variables['ace_filament_pos'] = 'toolhead'
+
+        # The nozzle should be cleaned by brushing
+        self.variables['ace_filament_pos'] = 'nozzle'
+
+        if self.disable_assist_after_toolchange:
+            self.send_request({"method": "stop_feed_assist", "params": {"index": tool}}, callback=None)
+
+    def _reject_tool(self, index):
+        self.gcode.respond_info(f'ACE: reject tool {index}')
+        sensor_extruder = self.printer.lookup_object('filament_switch_sensor %s' % 'extruder_sensor', None)
+
+        self._disable_feed_assist(index)
+        self.wait_ace_ready()
+        if  self.variables.get('ace_filament_pos', 'spliter') == 'nozzle':
+            self.gcode.respond_info(f'ACE: cut tool {index}')
+            self.gcode.run_script_from_command('CUT_TIP')
+            self.variables['ace_filament_pos'] = 'toolhead'
+
+        if  self.variables.get('ace_filament_pos', 'spliter') == 'toolhead':
+            self.gcode.respond_info(f'ACE: extract tool {index} out of the extruder')
+            while bool(sensor_extruder.runout_helper.filament_present):
+                self._extruder_move(-20, 5)
+                self._retract(index, 20, self.retract_speed)
+                self.dwell(1)
+            self.variables['ace_filament_pos'] = 'bowden'
+
+        self.wait_ace_ready()
+
+        self.gcode.respond_info(f'ACE: extract tool {index} out of the hub')
+        self._retract(index, self.toolchange_retract_length, self.retract_speed)
+        self.variables['ace_filament_pos'] = 'spliter'
+
+        self.wait_ace_ready()
+
+        self.gcode.respond_info(f'ACE: set current index -1')
+        self.variables['ace_current_index'] = -1
+
+    cmd_ACE_GET_CUR_INDEX_help = 'Get current tool index'
+    def cmd_ACE_GET_CUR_INDEX(self, gcmd):
+        self.gcode.respond_info('ACE Current index {}'.format(self.variables['ace_current_index']))
 
     cmd_ACE_START_DRYING_help = 'Starts ACE Pro dryer'
     def cmd_ACE_START_DRYING(self, gcmd):
@@ -482,17 +528,6 @@ class DuckAce:
 
         self.send_request(request = {'method':'drying_stop'}, callback = callback)
 
-    def _enable_feed_assist(self, index):
-        def callback(self, response):
-            if 'code' in response and response['code'] != 0:
-                raise ValueError('ACE Error: ' + response['msg'])
-            else:
-                self._feed_assist_index = index
-                # self.gcode.respond_info(str(response))
-
-        self.send_request(request = {'method': 'start_feed_assist', 'params': {'index': index}}, callback = callback)
-        self.dwell(delay = 0.7)
-
     cmd_ACE_ENABLE_FEED_ASSIST_help = 'Enables ACE feed assist'
     def cmd_ACE_ENABLE_FEED_ASSIST(self, gcmd):
         index = gcmd.get_int('INDEX')
@@ -501,18 +536,6 @@ class DuckAce:
             raise gcmd.error('Wrong index')
 
         self._enable_feed_assist(index)
-
-
-    def _disable_feed_assist(self, index):
-        def callback(self, response):
-            if 'code' in response and response['code'] != 0:
-                raise self.gcode.error('ACE Error: ' + response['msg'])
-
-            self._feed_assist_index = -1
-            self.gcode.respond_info('Disabled ACE feed assist')
-
-        self.send_request(request = {'method': 'stop_feed_assist', 'params': {'index': index}}, callback = callback)
-        self.dwell(0.3)
 
     cmd_ACE_DISABLE_FEED_ASSIST_help = 'Disables ACE feed assist'
     def cmd_ACE_DISABLE_FEED_ASSIST(self, gcmd):
@@ -525,16 +548,6 @@ class DuckAce:
             raise gcmd.error('Wrong index')
 
         self._disable_feed_assist(index)
-
-
-
-    def _feed(self, index, length, speed):
-        def callback(self, response):
-            if 'code' in response and response['code'] != 0:
-                raise ValueError('ACE Error: ' + response['msg'])
-
-        self.send_request(request = {'method': 'feed_filament', 'params': {'index': index, 'length': length, 'speed': speed}}, callback = callback)
-        self.dwell(delay = (length / speed) + 0.1)
 
     cmd_ACE_FEED_help = 'Feeds filament from ACE'
     def cmd_ACE_FEED(self, gcmd):
@@ -551,17 +564,6 @@ class DuckAce:
 
         self._feed(index, length, speed)
 
-
-    def _retract(self, index, length, speed):
-        def callback(self, response):
-            if 'code' in response and response['code'] != 0:
-                raise ValueError('ACE Error: ' + response['msg'])
-
-        self.send_request(
-            request={'method': 'unwind_filament', 'params': {'index': index, 'length': length, 'speed': speed}},
-            callback=callback)
-        self.dwell(delay=(length / speed) + 0.1)
-
     cmd_ACE_RETRACT_help = 'Retracts filament back to ACE'
     def cmd_ACE_RETRACT(self, gcmd):
         index = gcmd.get_int('INDEX')
@@ -576,53 +578,6 @@ class DuckAce:
             raise gcmd.error('Wrong speed')
 
         self._retract(index, length, speed)
-
-    def _park_to_toolhead(self, tool):
-        sensor_extruder = self.printer.lookup_object('filament_switch_sensor %s' % 'extruder_sensor', None)
-        sensor_toolhead = self.printer.lookup_object('filament_switch_sensor %s' % 'toolhead_sensor', None)
-
-        self._enable_feed_assist(tool)
-
-        while not bool(sensor_extruder.runout_helper.filament_present):
-            self.dwell(delay=0.1)
-
-        if not bool(sensor_extruder.runout_helper.filament_present):
-            raise ValueError('Filament stuck ' + str(bool(sensor_extruder.runout_helper.filament_present)))
-        else:
-            self.variables['ace_filament_pos'] = 'spliter'
-
-        while not bool(sensor_toolhead.runout_helper.filament_present):
-            self._extruder_move(1, 5)
-
-        self.variables['ace_filament_pos'] = 'toolhead'
-
-        # The nozzle should be cleaned by brushing
-        self.variables['ace_filament_pos'] = 'nozzle'
-
-    def _reject_tool(self, index):
-        sensor_extruder = self.printer.lookup_object('filament_switch_sensor %s' % 'extruder_sensor', None)
-
-        self._disable_feed_assist(index)
-        self.wait_ace_ready()
-        if  self.variables.get('ace_filament_pos', 'spliter') == 'nozzle':
-            self.gcode.run_script_from_command('CUT_TIP')
-            self.variables['ace_filament_pos'] = 'toolhead'
-
-        if  self.variables.get('ace_filament_pos', 'spliter') == 'toolhead':
-            while bool(sensor_extruder.runout_helper.filament_present):
-                self._extruder_move(-20, 5)
-                self._retract(index, 20, self.retract_speed)
-                self.dwell(1)
-            self.variables['ace_filament_pos'] = 'bowden'
-
-        self.wait_ace_ready()
-
-        self._retract(index, self.toolchange_retract_length, self.retract_speed)
-        self.variables['ace_filament_pos'] = 'spliter'
-
-        self.wait_ace_ready()
-
-        self.variables['ace_current_index'] = -1
 
     cmd_ACE_CLEAR_ALL_STATUS_help = 'Clean status'
     def cmd_ACE_CLEAR_ALL_STATUS(self, gcmd):
@@ -640,7 +595,7 @@ class DuckAce:
 
     cmd_ACE_CHANGE_TOOL_help = 'Changes tool'
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
-        self.gcode.respond_info('ACE: Changing tool...')
+        # self.gcode.respond_info('ACE: Changing tool...')
         tool = gcmd.get_int('TOOL')
 
         if tool < -1 or tool >= 4:
