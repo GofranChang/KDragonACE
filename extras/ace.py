@@ -440,6 +440,10 @@ class DuckAce:
         self.send_request(request = {'method': 'stop_feed_assist', 'params': {'index': index}}, callback = callback)
         self.dwell(0.3)
 
+    def _save_to_disk(self):
+        self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_current_index VALUE=' + str(self.variables['ace_current_index']))
+        self.gcode.run_script_from_command(f"""SAVE_VARIABLE VARIABLE=ace_filament_pos VALUE='"{self.variables['ace_filament_pos']}"'""")
+
     def _park_to_toolhead(self, tool):
         sensor_extruder = self.printer.lookup_object('filament_switch_sensor %s' % 'extruder_sensor', None)
         sensor_toolhead = self.printer.lookup_object('filament_switch_sensor %s' % 'toolhead_sensor', None)
@@ -494,6 +498,8 @@ class DuckAce:
 
         self.gcode.respond_info(f'ACE: set current index -1')
         self.variables['ace_current_index'] = -1
+
+        self._save_to_disk()
 
     cmd_ACE_GET_CUR_INDEX_help = 'Get current tool index'
     def cmd_ACE_GET_CUR_INDEX(self, gcmd):
@@ -583,6 +589,7 @@ class DuckAce:
     def cmd_ACE_CLEAR_ALL_STATUS(self, gcmd):
         self.variables['ace_current_index'] = -1
         self.variables['ace_filament_pos'] = 'spliter'
+        self._save_to_disk()
 
     cmd_ACE_REJECT_TOOL_help = 'Reject tool'
     def cmd_ACE_REJECT_TOOL(self, gcmd):
@@ -629,8 +636,9 @@ class DuckAce:
 
         self.variables['ace_current_index'] = tool
         # Force save to disk
-        self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_current_index VALUE=' + str(tool))
-        self.gcode.run_script_from_command(f"""SAVE_VARIABLE VARIABLE=ace_filament_pos VALUE='"{self.variables['ace_filament_pos']}"'""")
+        self._save_to_disk()
+        # self.gcode.run_script_from_command('SAVE_VARIABLE VARIABLE=ace_current_index VALUE=' + str(tool))
+        # self.gcode.run_script_from_command(f"""SAVE_VARIABLE VARIABLE=ace_filament_pos VALUE='"{self.variables['ace_filament_pos']}"'""")
 
         gcmd.respond_info(f'Tool {tool} load')
 
