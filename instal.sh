@@ -1,146 +1,46 @@
-#!/bin/sh
-IS_MIPS=0
-if [ "$(uname -m)" = "mips" ]; then
-   IS_MIPS=1
-fi
+#!/bin/bash
 
-KLIPPER_HOME="${HOME}/klipper"
-KLIPPER_CONFIG_HOME="${HOME}/printer_data/config"
-MOONRAKER_CONFIG_DIR="${HOME}/printer_data/config"
-SRCDIR="$PWD"
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ "$IS_MIPS" -eq 1 ]; then
-    KLIPPER_HOME="/usr/share/klipper"
-    KLIPPER_CONFIG_HOME="/usr/data/printer_data/config"
-    MOONRAKER_CONFIG_DIR="/usr/data/printer_data/config"
-fi
+PLUGIN_FILE="$SCRIPT_DIR/extras/ace.py"
 
-usage(){ echo "Usage: $0 [-u]" 1>&2; exit 1; }
-# Parse command line arguments
-UNINSTALL=0
-while getopts "uh" arg; do
-   case $arg in
-       u) UNINSTALL=1;;
-       h) usage;;
-   esac
-done
+# 提示用户输入 Klipper 安装路径
+echo "🔧 请输入你的 Klipper 安装路径 [默认: ~/klipper]:"
+echo "🔧 Please enter your Klipper install path [Default: ~/klipper]:"
+read -r USER_INPUT
 
-verify_ready()
-{
-  if [ "$IS_MIPS" -ne 1 ]; then
-    if [ "$EUID" -eq 0 ]; then
-        echo "[ERROR] This script must not run as root. Exiting."
-        exit 1
-    fi
-  else
-    echo -e "[WARNING] This script is running on a MIPS system, so we expect it to be run as root"
-  fi
-}
-
-check_folders()
-{
-    if [ ! -d "$KLIPPER_HOME/klippy/extras/" ]; then
-        echo "[ERROR] Klipper installation not found in directory \"$KLIPPER_HOME\". Exiting"
-        exit 1
-    fi
-    echo "Klipper installation found at $KLIPPER_HOME"
-
-    if [ ! -d "${KLIPPER_CONFIG_HOME}/" ]; then
-        echo "[ERROR] Klipper configs not found in directory \"$MOONRAKER_CONFIG_DIR\". Exiting"
-        exit 1
-    fi
-    echo "Klipper installation found at $KLIPPER_CONFIG_HOME"
-
-    if [ ! -f "${MOONRAKER_CONFIG_DIR}/moonraker.conf" ]; then
-        echo "[ERROR] Moonraker configuration not found in directory \"$MOONRAKER_CONFIG_DIR\". Exiting"
-        exit 1
-    fi
-    echo "Moonraker configuration found at $MOONRAKER_CONFIG_DIR"
-}
-
-link_extension()
-{
-    echo -n "Linking extension to Klipper... "
-    ln -sf "${SRCDIR}/extras/ace.py" "${KLIPPER_HOME}/klippy/extras/ace.py"
-    echo "[OK]"
-}
-
-copy_config()
-{
-  echo -n "Copy config file to Klipper... "
-  cp "./ace.cfg" "${KLIPPER_CONFIG_HOME}"
-  echo "[OK]"
-}
-
-uninstall()
-{
-    if [ -f "${KLIPPER_HOME}/klippy/extras/ace.py" ]; then
-        echo -n "Uninstalling... "
-        rm -f "${KLIPPER_HOME}/klippy/extras/ace.py"
-        echo "[OK]"
-        echo "You can now remove the [update_manager FrogAce] section in your moonraker.conf and delete this directory. Also remove all led_effect configurations from your Klipper configuration."
-    else
-        echo "ace.py not found in \"${KLIPPER_HOME}/klippy/extras/\". Is it installed?"
-        echo "[FAILED]"
-    fi
-}
-
-restart_moonraker()
-{
-    echo -n "Restarting Moonraker... "
-    set +e
-    /etc/init.d/S56moonraker_service restart
-    sleep 1
-    set -e
-    echo "[OK]"
-}
-
-start_klipper() {
-  echo -n "Starting Klipper... "
-  set +e
-  /etc/init.d/S55klipper_service start
-  set -e
-  echo "[OK]"
-}
-
-stop_klipper() {
-  echo -n "Stopping Klipper... "
-  set +e
-  /etc/init.d/S55klipper_service stop
-  set -e
-  echo "[OK]"
-}
-
-add_updater()
-{
-    echo -n "Adding update manager to moonraker.conf... "
-    update_section=0
-    update_section=$(grep -c '\[update_manager[a-z ]* FrogAce\]' "${MOONRAKER_CONFIG_DIR}/moonraker.conf" || true)
-    if [ "$update_section" -eq 0 ]; then
-        echo -e "\n[update_manager BunnyACE]" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo "type: git_repo" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo "path: ${SRCDIR}" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo "origin: https://github.com/BlackFrogKok/BunnyACE" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo "managed_services: klipper" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo -e "\n" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
-        echo "[OK]"
-    else
-        echo "[SKIPPED]"
-    fi
-}
-
-
-verify_ready
-check_folders
-stop_klipper
-
-if [ "$UNINSTALL" -ne 1 ]; then
-    link_extension
-    copy_config
-    add_updater
-    restart_moonraker
+if [ -z "$USER_INPUT" ]; then
+  KLIPPER_PATH="$HOME/klipper"
 else
-    uninstall
+  KLIPPER_PATH="$USER_INPUT"
 fi
 
-start_klipper
+# 去除路径尾部可能多余的斜杠
+KLIPPER_PATH="${KLIPPER_PATH%/}"
+
+# 检查目录是否存在
+if [ ! -d "$KLIPPER_PATH/klippy/extras" ]; then
+  echo "❌ 错误：找不到目录 $KLIPPER_PATH/klippy/extras"
+  echo "❌ Error: Directory $KLIPPER_PATH/klippy/extras not found."
+  exit 1
+fi
+
+# 拷贝插件文件
+~/klippy-env/bin/pip install --upgrade pyserial==3.5
+echo "📄 正在复制 $PLUGIN_FILE 到 $KLIPPER_PATH/klippy/extras ..."
+echo "📄 Copying $PLUGIN_FILE to $KLIPPER_PATH/klippy/extras ..."
+cp "$PLUGIN_FILE" "$KLIPPER_PATH/klippy/extras/"
+
+# 安装配置文件（假设是复制 firmware 目录到打印机配置）
+CONFIG_TARGET="$HOME/printer_data/config/ace_mmu"
+
+echo "📂 正在复制固件配置文件到 $CONFIG_TARGET ..."
+mkdir -p "$CONFIG_TARGET"
+cp -r "$SCRIPT_DIR/firmware/"* "$CONFIG_TARGET"
+
+echo "✅ 插件安装完成！"
+echo "✅ Plugin installation complete!"
+echo "🔁 请重启 Klipper 以加载新插件："
+echo "🔁 Please restart Klipper to load the plugin:"
+echo "   sudo systemctl restart klipper"
