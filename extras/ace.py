@@ -8,7 +8,7 @@ class PeekableQueue(queue.Queue):
                 return None
             return self.queue[0]
 
-class DuckAce:
+class KDragonACE:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
