@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="./docs/imgs/logo.png" alt='Happy Hare' width='30%'>
+  <h1 align="center">Happy Hare</h1>
+</p>
+
 # 🐉KDragonACE
 
 * 本项目基于 [BunnyACE](https://github.com/BlackFrogKok/BunnyACE) Fork，BunnyACE又源自[DuckACE](https://github.com/utkabobr/DuckACE)。感谢大佬们开源。
@@ -79,8 +84,8 @@ ACE_FEED INDEX=0 LENGTH=1000
 
 | 参数 | 含义           | 示例值 |
 |----|----|----|
-| INDEX | 进料通道，从左到右依次为0、1、2、3 | 0 |
-| LENGTH | 进料长度（mm） | 1000  |
+| INDEX | 退料通道，从左到右依次为0、1、2、3 | 0 |
+| LENGTH | 退料长度（mm） | 1000  |
 
 使用示例：
 ```gcode
