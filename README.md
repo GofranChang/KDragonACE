@@ -1,9 +1,8 @@
 <p align="center">
   <img src="./docs/imgs/logo.png" alt='Happy Hare' width='30%'>
-  <h1 align="center">Happy Hare</h1>
+  <h1 align="center">KDragonACE</h1>
 </p>
 
-# 🐉KDragonACE
 
 * 本项目基于 [BunnyACE](https://github.com/BlackFrogKok/BunnyACE) Fork，BunnyACE又源自[DuckACE](https://github.com/utkabobr/DuckACE)。感谢大佬们开源。
 * 本版本着重优化串口通信稳定性，提升 Klipper 的兼容性，特别针对 ACE Pro 长时间打印过程中偶发断联问题做出改进。
