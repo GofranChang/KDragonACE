@@ -675,4 +675,4 @@ class KDragonACE:
 
 
 def load_config(config):
-    return DuckAce(config)
+    return KDragonACE(config)
