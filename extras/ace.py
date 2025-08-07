@@ -20,8 +20,8 @@ class KDragonACE:
 
         self.serial_name = config.get('serial', '/dev/ttyACM0')
         self.baud = config.getint('baud', 115200)
-        extruder_sensor_pin = config.get('extruder_sensor_pin', None)
-        toolhead_sensor_pin = config.get('toolhead_sensor_pin', None)
+        self.extruder_sensor_pin = config.get('extruder_sensor_pin', None)
+        self.toolhead_sensor_pin = config.get('toolhead_sensor_pin', None)
         self.feed_speed = config.getint('feed_speed', 50)
         self.retract_speed = config.getint('retract_speed', 50)
         self.toolchange_retract_length = config.getint('toolchange_retract_length', 100)
@@ -43,7 +43,7 @@ class KDragonACE:
         # Default data to prevent exceptions
         self._info = {
             'status': 'ready',
-            'dryer': {
+            'dryer_status': {
                 'status': 'stop',
                 'target_temp': 0,
                 'duration': 0,
@@ -54,6 +54,7 @@ class KDragonACE:
             'fan_speed': 7000,
             'feed_assist_count': 0,
             'cont_assist_time': 0.0,
+            'current_feed_assist_slot': -1,
             'slots': [
                 {
                     'index': 0,
@@ -86,8 +87,12 @@ class KDragonACE:
             ]
         }
 
-        self._create_mmu_sensor(config, extruder_sensor_pin, 'extruder_sensor')
-        self._create_mmu_sensor(config, toolhead_sensor_pin, 'toolhead_sensor')
+        # 创建MMU传感器（多材料单元传感器）- 仅在配置了引脚时创建
+        if self.extruder_sensor_pin is not None:
+            self._create_mmu_sensor(config, self.extruder_sensor_pin, 'extruder_sensor')
+        if self.toolhead_sensor_pin is not None:
+            self._create_mmu_sensor(config, self.toolhead_sensor_pin, 'toolhead_sensor')
+
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self.printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
 
@@ -128,6 +133,19 @@ class KDragonACE:
         self.gcode.register_command(
             'ACE_DEBUG', self.cmd_ACE_DEBUG,
             desc=self.cmd_ACE_DEBUG_help)
+        self.gcode.register_command(
+            'ACE_STATUS', self.cmd_ACE_STATUS,
+            desc=self.cmd_ACE_STATUS_help)
+
+        # 注册到打印机对象，使其可以被前端查询
+        self.printer.add_object("ace", self)
+
+    def get_status(self, eventtime=None):
+        """
+        返回ACE设备状态，供前端查询
+        这个方法会被Klipper的状态查询系统调用
+        """
+        return self._info.copy()
 
     def _handle_ready(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -247,7 +265,42 @@ class KDragonACE:
     def _send_heartbeat(self, id):
         def callback(self, response):
             if response is not None:
-                self._info = response['result']
+                # self._info = response['result']
+                # 只更新ACE设备实际提供的状态字段，避免覆盖本地状态
+                result = response['result']
+                if 'status' in result:
+                    self._info['status'] = result['status']
+                if 'temp' in result:
+                    self._info['temp'] = result['temp']
+                if 'enable_rfid' in result:
+                    self._info['enable_rfid'] = result['enable_rfid']
+                if 'fan_speed' in result:
+                    self._info['fan_speed'] = result['fan_speed']
+                if 'feed_assist_count' in result:
+                    self._info['feed_assist_count'] = result['feed_assist_count']
+                if 'cont_assist_time' in result:
+                    self._info['cont_assist_time'] = result['cont_assist_time']
+                
+                # 更新料槽状态（ACE设备会提供准确的料槽状态）
+                if 'slots' in result:
+                    self._info['slots'] = result['slots']
+                
+                # 更新烘干器状态 - 与slots状态更新保持一致的频率
+                if 'dryer_status' in result:
+                    # 直接更新烘干器状态，与slots更新逻辑保持一致
+                    if result['dryer_status']:
+                        self._info['dryer_status'] = result['dryer_status']
+                    else:
+                        # 如果dryer_status为空，重置为默认停止状态
+                        self._info['dryer_status'] = {
+                            'status': 'stop',
+                            'target_temp': 0,
+                            'duration': 0,
+                            'remain_time': 0
+                        }         
+                # 添加当前辅助进料料槽信息到状态中
+                self._info['current_feed_assist_slot'] = self._feed_assist_index
+
 
                 if self._park_in_progress and self._info['status'] == 'ready':
                     new_assist_count = self._info['feed_assist_count']
@@ -315,7 +368,7 @@ class KDragonACE:
             return None
 
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        logging.info(f'[ACE] {now} <<< {ret}')
+        # logging.info(f'[ACE] {now} <<< {ret}')
         id = ret['id']
         if id in self._callback_map:
             callback = self._callback_map.pop(id)
@@ -404,6 +457,8 @@ class KDragonACE:
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
                 raise ValueError('ACE Error: ' + response['msg'])
+            # 如果进行手动进料，辅助进料会被中断
+            self._feed_assist_index = -1
 
         self.send_request(request = {'method': 'feed_filament', 'params': {'index': index, 'length': length, 'speed': speed}}, callback = callback)
         self.dwell(delay = (length / speed) + 0.1)
@@ -412,6 +467,8 @@ class KDragonACE:
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
                 raise ValueError('ACE Error: ' + response['msg'])
+            # 如果进行手动退料，辅助进料会被中断
+            self._feed_assist_index = -1
 
         self.send_request(
             request={'method': 'unwind_filament', 'params': {'index': index, 'length': length, 'speed': speed}},
@@ -518,6 +575,11 @@ class KDragonACE:
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
                 raise gcmd.error('ACE Error: ' + response['msg'])
+            # 更新字典
+            self._info['dryer_status']['status'] = 'drying'
+            self._info['dryer_status']['target_temp'] = temperature
+            self._info['dryer_status']['duration'] = duration
+            self._info['dryer_status']['remain_time'] = duration
 
             self.gcode.respond_info('Started ACE drying')
 
@@ -529,6 +591,11 @@ class KDragonACE:
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
                 raise gcmd.error('ACE Error: ' + response['msg'])
+            
+            self._info['dryer_status']['status'] = 'stop'
+            self._info['dryer_status']['target_temp'] = 0
+            self._info['dryer_status']['duration'] = 0
+            self._info['dryer_status']['remain_time'] = 0
 
             self.gcode.respond_info('Stopped ACE drying')
 
@@ -673,6 +740,80 @@ class KDragonACE:
         except Exception as e:
             self.gcode.respond_info('Error: ' + str(e))
 
+    cmd_ACE_STATUS_help = 'Get ACE device status'
+    def cmd_ACE_STATUS(self, gcmd):
+        """
+        G-code命令：ACE_STATUS
+        获取并显示ACE设备的完整状态信息
+        
+        示例: ACE_STATUS
+        """
+        def callback(self, response):
+            if 'code' in response and response['code'] != 0:
+                self.gcode.respond_info('ACE Error: ' + response['msg'])
+                return
+            
+            result = response.get('result', {})
+            
+            # 同步ACE设备的最新状态到本地（强制同步，因为这是显式查询）
+            if result:
+                # 更新设备基本状态
+                if 'status' in result:
+                    self._info['status'] = result['status']
+                if 'temp' in result:
+                    self._info['temp'] = result['temp']
+                if 'enable_rfid' in result:
+                    self._info['enable_rfid'] = result['enable_rfid']
+                if 'fan_speed' in result:
+                    self._info['fan_speed'] = result['fan_speed']
+                if 'feed_assist_count' in result:
+                    self._info['feed_assist_count'] = result['feed_assist_count']
+                if 'cont_assist_time' in result:
+                    self._info['cont_assist_time'] = result['cont_assist_time']
+                
+                # 更新料槽状态（ACE设备会提供准确的料槽状态）
+                if 'slots' in result:
+                    self._info['slots'] = result['slots']
+                
+                # 更新烘干器状态（强制同步，因为这是显式查询）
+                if 'dryer_status' in result and result['dryer_status']:
+                    self._info['dryer'] = result['dryer_status']
+            
+            # 显示设备基本状态
+            self.gcode.respond_info(f"ACE Device Status: {self._info.get('status', 'unknown')}")
+            self.gcode.respond_info(f"Temperature: {self._info.get('temp', 0)}°C")
+            self.gcode.respond_info(f"Fan Speed: {self._info.get('fan_speed', 0)} RPM")
+            self.gcode.respond_info(f"Feed Assist Count: {self._info.get('feed_assist_count', 0)}")
+            
+            # 显示烘干器状态
+            dryer = self._info.get('dryer', {})
+            self.gcode.respond_info(f"Dryer Status: {dryer.get('status', 'stop')}")
+            if dryer.get('status') == 'running':
+                self.gcode.respond_info(f"Dryer Target Temp: {dryer.get('target_temp', 0)}°C")
+                self.gcode.respond_info(f"Dryer Duration: {dryer.get('duration', 0)} min")
+                self.gcode.respond_info(f"Dryer Remain Time: {dryer.get('remain_time', 0)} min")
+            
+            # 显示料槽状态
+            slots = self._info.get('slots', [])
+            self.gcode.respond_info("Slot Status:")
+            for slot in slots:
+                index = slot.get('index', 0)
+                status = slot.get('status', 'empty')
+                sku = slot.get('sku', '')
+                slot_type = slot.get('type', '')
+                color = slot.get('color', [0, 0, 0])
+                
+                slot_info = f"  Slot {index}: {status}"
+                if sku:
+                    slot_info += f", SKU: {sku}"
+                if slot_type:
+                    slot_info += f", Type: {slot_type}"
+                if color != [0, 0, 0]:
+                    slot_info += f", Color: RGB({color[0]}, {color[1]}, {color[2]})"
+                
+                self.gcode.respond_info(slot_info)
+
+        self.send_request(request={'method': 'get_status'}, callback=callback)
 
 def load_config(config):
     return KDragonACE(config)
