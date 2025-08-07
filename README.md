@@ -60,7 +60,7 @@ ACE Pro与上位机通过USB连接：
 2. 安装插件
    ```
    cd KDragonACE
-   ./instal.sh
+   ./install.sh
    ```
 3. 重启打印机
 
