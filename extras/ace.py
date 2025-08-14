@@ -87,6 +87,13 @@ class KDragonACE:
             ]
         }
 
+        # 载入持久化的料槽配置信息（类型/颜色/SKU）
+        try:
+            self._saved_slot_config = self._load_saved_slot_config()
+        except Exception:
+            self._saved_slot_config = {}
+        self._apply_saved_slot_config_to_info()
+
         # 创建MMU传感器（多材料单元传感器）- 仅在配置了引脚时创建
         if self.extruder_sensor_pin is not None:
             self._create_mmu_sensor(config, self.extruder_sensor_pin, 'extruder_sensor')
@@ -95,6 +102,11 @@ class KDragonACE:
 
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self.printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
+
+        gcode_macro = self.printer.load_object(config, "gcode_macro")
+        self.pause_macro = gcode_macro.load_template(
+            config, "pause_gcode", "PAUSE"
+        )
 
         self.gcode.register_command(
             'ACE_GET_CUR_INDEX', self.cmd_ACE_GET_CUR_INDEX,
@@ -136,6 +148,13 @@ class KDragonACE:
         self.gcode.register_command(
             'ACE_STATUS', self.cmd_ACE_STATUS,
             desc=self.cmd_ACE_STATUS_help)
+        self.gcode.register_command(
+            'ACE_SET_STATUS', self.cmd_ACE_SET_STATUS,
+            desc=self.cmd_ACE_SET_STATUS_help)
+        self.gcode.register_command(
+            'ACE_SET_SLOT_INFO', self.cmd_ACE_SET_SLOT_INFO,
+            desc=self.cmd_ACE_SET_SLOT_INFO_help)
+
 
         # 注册到打印机对象，使其可以被前端查询
         self.printer.add_object("ace", self)
@@ -219,7 +238,7 @@ class KDragonACE:
         data += bytes([0xFE])
 
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        logging.info(f'[ACE] {now} >>> {request}')
+        # logging.info(f'[ACE] {now} >>> {request}')
 
         try:
             self._serial.write(data)
@@ -284,6 +303,8 @@ class KDragonACE:
                 # 更新料槽状态（ACE设备会提供准确的料槽状态）
                 if 'slots' in result:
                     self._info['slots'] = result['slots']
+                    # 将本地保存的类型/颜色/SKU 覆盖到最新的槽位状态上
+                    self._apply_saved_slot_config_to_info()
                 
                 # 更新烘干器状态 - 与slots状态更新保持一致的频率
                 if 'dryer_status' in result:
@@ -507,17 +528,30 @@ class KDragonACE:
 
         self._enable_feed_assist(tool)
 
-        while not bool(sensor_extruder.runout_helper.filament_present):
-            self.dwell(delay=0.1)
-
-        if not bool(sensor_extruder.runout_helper.filament_present):
-            raise ValueError('Filament stuck ' + str(bool(sensor_extruder.runout_helper.filament_present)))
+        for _ in range(20):
+            if bool(sensor_extruder.runout_helper.filament_present):
+                break
+            self._feed(tool, 40, self.feed_speed)
+            self.dwell(delay=2)
         else:
             self.variables['ace_filament_pos'] = 'spliter'
-
-        while not bool(sensor_toolhead.runout_helper.filament_present):
-            self._extruder_move(1, 5)
-
+            self.gcode.respond_info('Filament not in the Extruder')
+            self._send_pause()
+            return
+            # raise ValueError('Filament stuck at bowden' + str(bool(sensor_toolhead.runout_helper.filament_present)))
+        self._feed(tool, 20, self.feed_speed)
+        self._enable_feed_assist(tool)
+        for _ in range(10):
+            if bool(sensor_toolhead.runout_helper.filament_present):
+                break
+            self._extruder_move(20, 5)
+            self.dwell(delay=1)
+        else:
+            #raise ValueError('Filament stuck at toolhead ' + str(bool(sensor_extruder.runout_helper.filament_present)))
+            self.gcode.respond_info('Filament not in the Toolhead')
+            self._send_pause()
+            return
+        self._enable_feed_assist(tool)
         self.variables['ace_filament_pos'] = 'toolhead'
 
         # The nozzle should be cleaned by brushing
@@ -557,6 +591,109 @@ class KDragonACE:
         self.variables['ace_current_index'] = -1
 
         self._save_to_disk()
+
+    def _send_pause(self):
+        pause_resume = self.printer.lookup_object("pause_resume")
+        if pause_resume.get_status(self.reactor.monotonic())["is_paused"]:
+            return
+
+        # run pause macro
+        self.pause_macro.run_gcode_from_command()
+    
+    def _load_saved_slot_config(self):
+        """从 save_variables 载入已保存的料槽信息。
+        优先兼容旧的单字典键 'ace_slots_config'，并合并每个独立键：
+        ace_slot_{i}_type, ace_slot_{i}_color, ace_slot_{i}_sku
+        返回格式：{ index: { 'type': str, 'color': [r,g,b], 'sku': str } }
+        """
+        merged = {}
+        try:
+            for i in range(4):
+                t = self.variables.get(f'ace_slot_{i}_type', None)
+                c = self.variables.get(f'ace_slot_{i}_color', None)
+                s = self.variables.get(f'ace_slot_{i}_sku', None)
+                if t is None and c is None and s is None:
+                    continue
+                if i not in merged:
+                    merged[i] = {}
+                if isinstance(t, str) and t:
+                    merged[i]['type'] = t
+                if isinstance(c, (list, tuple)) and len(c) >= 3:
+                    try:
+                        r, g, b = int(c[0]), int(c[1]), int(c[2])
+                        merged[i]['color'] = [r, g, b]
+                    except Exception:
+                        pass
+                if isinstance(s, str):
+                    merged[i]['sku'] = s
+        except Exception:
+            pass
+
+        return merged
+
+    def _persist_slot_index(self, idx):
+        """将指定槽位的键分别持久化为独立变量，避免字典整体保存导致的命令格式问题。"""
+        if not hasattr(self, '_saved_slot_config'):
+            return
+        data = self._saved_slot_config.get(idx, {})
+        # TYPE
+        if 'type' in data:
+            t = data.get('type', '')
+            if isinstance(t, str):
+                self.variables[f'ace_slot_{idx}_type'] = t
+                # 传递 python 字面量字符串，使用引号
+                self.gcode.run_script_from_command(
+                    f'SAVE_VARIABLE VARIABLE=ace_slot_{idx}_type VALUE="{repr(t)}"')
+        # SKU
+        if 'sku' in data:
+            s = data.get('sku', '')
+            if isinstance(s, str):
+                self.variables[f'ace_slot_{idx}_sku'] = s
+                self.gcode.run_script_from_command(
+                    f'SAVE_VARIABLE VARIABLE=ace_slot_{idx}_sku VALUE="{repr(s)}"')
+        # COLOR
+        if 'color' in data:
+            c = data.get('color')
+            if isinstance(c, (list, tuple)) and len(c) >= 3:
+                try:
+                    r, g, b = int(c[0]), int(c[1]), int(c[2])
+                    c_list = [max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))]
+                except Exception:
+                    c_list = None
+                if c_list is not None:
+                    self.variables[f'ace_slot_{idx}_color'] = c_list
+                    # 列表作为 python 字面量，整体用双引号包裹为一个 token
+                    self.gcode.run_script_from_command(
+                        f'SAVE_VARIABLE VARIABLE=ace_slot_{idx}_color VALUE="{c_list}"')
+
+    def _apply_saved_slot_config_to_info(self):
+        """将本地保存的槽位设置覆盖到 self._info['slots'] 上。"""
+        try:
+            if not hasattr(self, '_saved_slot_config') or not self._saved_slot_config:
+                return
+            slots = self._info.get('slots', [])
+            for slot in slots:
+                idx = slot.get('index', -1)
+                if idx in self._saved_slot_config:
+                    saved = self._saved_slot_config[idx]
+                    # 覆盖类型
+                    t = saved.get('type', '')
+                    if isinstance(t, str) and t:
+                        slot['type'] = t
+                    # 覆盖颜色
+                    c = saved.get('color', None)
+                    if isinstance(c, list) and len(c) >= 3:
+                        try:
+                            r, g, b = int(c[0]), int(c[1]), int(c[2])
+                            slot['color'] = [max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))]
+                        except Exception:
+                            pass
+                    # 覆盖 SKU
+                    sku = saved.get('sku', None)
+                    if isinstance(sku, str):
+                        slot['sku'] = sku
+        except Exception as e:
+            logging.warning(f"[ACE] Failed to apply saved slot config: {e}")
 
     cmd_ACE_GET_CUR_INDEX_help = 'Get current tool index'
     def cmd_ACE_GET_CUR_INDEX(self, gcmd):
@@ -814,6 +951,106 @@ class KDragonACE:
                 self.gcode.respond_info(slot_info)
 
         self.send_request(request={'method': 'get_status'}, callback=callback)
+
+    cmd_ACE_SET_STATUS_help = 'Set ACE status manully'
+    def cmd_ACE_SET_STATUS(self, gcmd):
+        # 允许省略任意参数；未提供时保持当前值
+        current_index = self.variables.get('ace_current_index', -1)
+        current_pos = self.variables.get('ace_filament_pos', 'spliter')
+
+        # 解析 INDEX（可选）
+        index_raw = gcmd.get('INDEX', None)
+        if index_raw is None or index_raw == '':
+            index = current_index
+        else:
+            try:
+                index = int(index_raw)
+            except Exception:
+                raise gcmd.error('INDEX must be an integer in range -1..3')
+            if index < -1 or index > 3:
+                raise gcmd.error('Wrong index: expected -1..3')
+
+        # 解析 POS（可选，大小写不敏感）
+        position_raw = gcmd.get('POS', None)
+        if position_raw is None or position_raw == '':
+            position = current_pos
+        else:
+            position = str(position_raw).strip().lower()
+            valid_positions = {'spliter', 'bowden', 'toolhead', 'nozzle'}
+            if position not in valid_positions:
+                raise gcmd.error('Wrong POS: expected one of spliter|bowden|toolhead|nozzle')
+
+        # 语义约束：当位置为 toolhead/nozzle 时，应当存在有效的工具索引
+        if position in ('toolhead', 'nozzle') and index == -1:
+            raise gcmd.error('POS implies filament at toolhead/nozzle, require INDEX in 0..3')
+
+        # 无变更时直接提示并返回
+        if index == current_index and position == current_pos:
+            gcmd.respond_info('ACE: status unchanged')
+            return
+
+        # 应用变更并持久化
+        self.variables['ace_filament_pos'] = position
+        self.variables['ace_current_index'] = index
+        self._save_to_disk()
+
+        gcmd.respond_info(f"ACE: status set INDEX={index} POS={position}")
+
+    cmd_ACE_SET_SLOT_INFO_help = 'Set ACE slot info and persist (TYPE/COLOR/SKU)'
+    def cmd_ACE_SET_SLOT_INFO(self, gcmd):
+        """
+        设置并保存料槽信息：
+        用法:
+          ACE_SET_SLOT_INFO INDEX=<0-3> [TYPE=<str>] [COLOR=<r,g,b>] [SKU=<str>]
+        说明:
+          - TYPE/COLOR/SKU 均为可选，提供则更新并保存
+          - COLOR 需为逗号分隔的三个 0-255 整数
+        """
+        idx = gcmd.get_int('INDEX')
+        if idx < 0 or idx >= 4:
+            raise gcmd.error('Wrong index')
+
+        type_val = gcmd.get('TYPE', None)
+        color_val = gcmd.get('COLOR', None)
+        sku_val = gcmd.get('SKU', None)
+
+        if not hasattr(self, '_saved_slot_config') or self._saved_slot_config is None:
+            self._saved_slot_config = {}
+        if idx not in self._saved_slot_config or not isinstance(self._saved_slot_config.get(idx), dict):
+            self._saved_slot_config[idx] = {}
+
+        if type_val is not None:
+            self._saved_slot_config[idx]['type'] = type_val
+
+        if color_val is not None:
+            try:
+                parts = [p.strip() for p in color_val.split(',')]
+                if len(parts) != 3:
+                    raise ValueError('COLOR should be r,g,b')
+                r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+                r = max(0, min(255, r))
+                g = max(0, min(255, g))
+                b = max(0, min(255, b))
+                self._saved_slot_config[idx]['color'] = [r, g, b]
+            except Exception:
+                raise gcmd.error('Invalid COLOR value, expected r,g,b')
+
+        if sku_val is not None:
+            self._saved_slot_config[idx]['sku'] = sku_val
+
+        # 保存到磁盘
+        self._persist_slot_index(idx)
+
+        # 立刻覆盖当前状态，便于前端立即看到变更
+        self._apply_saved_slot_config_to_info()
+
+        # 显式触发状态响应，促使前端订阅者刷新
+        try:
+            self.gcode.respond_info('')
+        except Exception:
+            pass
+
+        gcmd.respond_info(f'ACE: slot {idx} info saved')
 
 def load_config(config):
     return KDragonACE(config)
