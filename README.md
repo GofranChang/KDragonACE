@@ -4,8 +4,11 @@
 </p>
 
 
+
+* [英文文档 - English Documentation](./README_EN.md)
 * 本项目基于 [BunnyACE](https://github.com/BlackFrogKok/BunnyACE) Fork，BunnyACE又源自[DuckACE](https://github.com/utkabobr/DuckACE)。感谢大佬们开源。
 * 本版本着重优化串口通信稳定性，提升 Klipper 的兼容性，特别针对 ACE Pro 长时间打印过程中偶发断联问题做出改进。
+* [Mainsail前端适配](https://github.com/Sukhoi-air/mainsail-ace)
 
 ---
 
@@ -66,7 +69,7 @@ ACE Pro与上位机通过USB连接：
 
 ### 3. 软件调试
 #### 常用命令
-1. ACE_FEED - 进料
+##### 1. ACE_FEED - 进料
 
 | 参数 | 含义           | 示例值 |
 |----|----|----|
@@ -79,7 +82,7 @@ ACE Pro与上位机通过USB连接：
 ACE_FEED INDEX=0 LENGTH=1000
 ```
 
-2. ACE_RETRACT - 退料
+##### 2. ACE_RETRACT - 退料
 
 | 参数 | 含义           | 示例值 |
 |----|----|----|
@@ -91,7 +94,7 @@ ACE_FEED INDEX=0 LENGTH=1000
 ACE_RETRACT INDEX=0 LENGTH=1000
 ```
 
-3. ACE_START_DRYING - 开启烘干
+##### 3. ACE_START_DRYING - 开启烘干
 
 | 参数 | 含义           | 示例值 |
 |----|----|----|
@@ -102,7 +105,7 @@ ACE_RETRACT INDEX=0 LENGTH=1000
 ACE_START_DRYING TEMP=55
 ```
 
-4. ACE_STOP_DRYING - 停止烘干
+##### 4. ACE_STOP_DRYING - 停止烘干
 
 | 参数 | 含义           | 示例值 |
 |----|----|----|
@@ -112,5 +115,137 @@ ACE_START_DRYING TEMP=55
 ```gcode
 ACE_STOP_DRYING
 ```
+
+##### 5. ACE_ENABLE_FEED_ASSIST - 开启辅助进料
+为指定通道开启持续辅助进料功能。
+
+| 参数 | 含义           | 示例值 |
+|----|----|----|
+| INDEX | 通道索引 | 0 |
+
+使用示例：
+```gcode
+ACE_ENABLE_FEED_ASSIST INDEX=0
+```
+
+##### 6. ACE_DISABLE_FEED_ASSIST - 关闭辅助进料
+关闭指定通道的辅助进料功能。
+
+| 参数 | 含义           | 示例值 |
+|----|----|----|
+| INDEX | 通道索引 | 0 |
+
+使用示例：
+```gcode
+ACE_DISABLE_FEED_ASSIST INDEX=0
+```
 ---
-📌 正在整理详细配置示例和调试指南，敬请关注后续更新！
+
+#### 🚀 进阶命令
+
+##### 状态管理类命令
+
+###### 1. ACE_GET_CUR_INDEX - 获取当前工具索引
+获取当前正在使用的工具索引号。
+
+使用示例：
+```gcode
+ACE_GET_CUR_INDEX
+```
+
+###### 2. ACE_STATUS - 获取ACE设备完整状态
+显示设备温度、风扇转速、烘干状态、所有料槽信息等详细状态。
+
+使用示例：
+```gcode
+ACE_STATUS
+```
+
+###### 3. ACE_SET_STATUS - 手动设置状态
+手动设置当前工具索引和料线位置状态。
+
+| 参数 | 含义           | 示例值 |
+|----|----|----|
+| INDEX | 工具索引（-1表示无工具） | 0 |
+| POS | 料线位置（spliter/bowden/toolhead/nozzle） | toolhead |
+
+使用示例：
+```gcode
+ACE_SET_STATUS INDEX=0 POS=toolhead
+```
+
+###### 4. ACE_CLEAR_ALL_STATUS - 清除所有状态
+重置当前工具索引为-1，料线位置为spliter。
+
+使用示例：
+```gcode
+ACE_CLEAR_ALL_STATUS
+```
+
+##### 工具切换类命令（需要配置工具头挤出机双传感器）
+
+###### 5. ACE_REJECT_TOOL - 卸载工具
+卸载指定工具或当前工具。
+
+| 参数 | 含义           | 示例值 |
+|----|----|----|
+| TOOL | 要卸载的工具索引（-1表示当前工具） | 0 |
+
+使用示例：
+```gcode
+ACE_REJECT_TOOL TOOL=0
+```
+
+###### 6. ACE_CHANGE_TOOL - 切换工具
+自动完成完整的工具切换流程，包括退料和新工具加载。
+
+| 参数 | 含义           | 示例值 |
+|----|----|----|
+| TOOL | 目标工具索引 | 1 |
+
+使用示例：
+```gcode
+# 切换到工具1
+ACE_CHANGE_TOOL TOOL=1
+```
+
+###### 7. ACE_FILAMENT_STATUS - 料线状态可视化
+在console显示耗材位置。
+
+使用示例：
+```gcode
+ACE_FILAMENT_STATUS
+```
+
+##### 料槽管理类命令
+
+###### 8. ACE_SET_SLOT_INFO - 设置料槽信息
+设置并保存指定料槽的类型、颜色和SKU信息。
+
+| 参数 | 含义           | 示例值 |
+|----|----|----|
+| INDEX | 料槽索引 | 0 |
+| TYPE | 材料类型 | PLA |
+| COLOR | RGB颜色值（r,g,b格式） | 255,0,0 |
+| SKU | 产品SKU | PLA-RED-001 |
+
+使用示例：
+```gcode
+ACE_SET_SLOT_INFO INDEX=0 TYPE=PLA COLOR=255,0,0 SKU=PLA-RED-001
+```
+
+#### 调试命令
+
+##### 9. ACE_DEBUG - 调试接口
+直接调用ACE设备的底层API进行调试。
+
+| 参数 | 含义           | 示例值 |
+|----|----|----|
+| METHOD | API方法名 | get_info |
+| PARAMS | JSON格式的参数 | {} |
+
+使用示例：
+```gcode
+ACE_DEBUG METHOD=get_info PARAMS={}
+```
+
